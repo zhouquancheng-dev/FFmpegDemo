@@ -38,8 +38,21 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "FFmpegDemo"
-        private const val SUBTITLE_FONT_SIZE = 10
-        private const val TARGET_FPS = 25
+
+        // ── 字幕样式 ──
+        private const val SUBTITLE_FONT_SIZE = 10       // libass 字体大小（基于 PlayResY=288）
+        private const val SUBTITLE_MARGIN_V = 24         // 字幕距底部距离（↑ 调大远离底边）
+        private const val SUBTITLE_OUTLINE = 1           // 描边宽度
+        private const val SUBTITLE_SHADOW = 0            // 阴影（0=无）
+        private const val SUBTITLE_USABLE_WIDTH = 0.85   // 字幕可用宽度占比（用于计算每行最大字数）
+
+        // ── 音频 ──
+        private const val BGM_VOLUME = 0.3               // 背景音乐音量（0.0~1.0）
+        private const val BGM_FADEOUT_SEC = 2             // BGM 结尾淡出秒数
+        private const val AUDIO_BITRATE = "128k"         // 音频编码码率
+
+        // ── 动效 ──
+        private const val TARGET_FPS = 25                // zoompan 帧率
     }
 
     private lateinit var tvDeviceInfo: TextView
@@ -391,62 +404,12 @@ class MainActivity : AppCompatActivity() {
                 val videoWidth = stream.width.toDouble()
                 val videoHeight = stream.height.toDouble()
                 val charPixelWidth = fontSize * videoHeight / 288.0
-                val usableWidth = videoWidth * 0.85
+                val usableWidth = videoWidth * SUBTITLE_USABLE_WIDTH
                 val calculated = (usableWidth / charPixelWidth).toInt()
                 if (calculated > 0) return calculated
             }
         }
         return 20
-    }
-
-    private fun wrapText(text: String, maxChars: Int): String {
-        if ('\n' in text) return text                     // 已有换行符，不处理
-        if (text.length <= maxChars) return text           // 一行放得下
-
-        val punctuation = setOf('，', '。', '、', '；', '！', '？', ',', '.', '!', '?')
-
-        // ── 短文本（≤2行）：中点二分，两行等长更美观 ──
-        if (text.length <= maxChars * 2) {
-            val mid = text.length / 2
-            val searchRange = text.length / 4
-            var bestPos = -1
-            var minDist = Int.MAX_VALUE
-            for (i in (mid - searchRange).coerceAtLeast(0) until (mid + searchRange).coerceAtMost(text.length)) {
-                if (text[i] in punctuation) {
-                    val dist = kotlin.math.abs(i - mid)
-                    if (dist < minDist) {
-                        minDist = dist
-                        bestPos = i + 1   // 标点留在上行
-                    }
-                }
-            }
-            // 找到标点就在那断，否则在中点强制断
-            val splitAt = if (bestPos != -1) bestPos else mid
-            return "${text.substring(0, splitAt).trim()}\n${text.substring(splitAt).trim()}"
-        }
-
-        // ── 超长文本（>2行）：逐行填充兜底 ──
-        val hardLimit = maxChars + maxChars / 5
-        val lines = mutableListOf<String>()
-        var start = 0
-        while (start < text.length) {
-            if (text.length - start <= maxChars) {
-                lines.add(text.substring(start))
-                break
-            }
-            var breakAt = -1
-            val searchEnd = minOf(start + hardLimit, text.length)
-            for (i in start + maxChars - 1 until searchEnd) {
-                if (text[i] in punctuation) {
-                    breakAt = i + 1
-                    break
-                }
-            }
-            if (breakAt == -1) breakAt = minOf(start + hardLimit, text.length)
-            lines.add(text.substring(start, breakAt))
-            start = breakAt
-        }
-        return lines.joinToString("\n")
     }
 
     private fun getVideoDurationMs(file: File): Long {
@@ -626,7 +589,7 @@ class MainActivity : AppCompatActivity() {
                         append("-preset $preset -crf $crf ")
                     }
                 }
-                append("-c:a aac -b:a 128k ")
+                append("-c:a aac -b:a $AUDIO_BITRATE ")
                 append("-pix_fmt yuv420p ")
                 append("-shortest ")
                 append("-y \"${segOutputFile.absolutePath}\"")
@@ -689,7 +652,7 @@ class MainActivity : AppCompatActivity() {
         val subStart = System.currentTimeMillis()
 
         // BGM 混音滤镜：BGM 循环播放、音量 30%，以视频时长为准
-        val audioFilter = "[1:a]volume=0.3[bgm];[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]"
+        val audioFilter = "[1:a]volume=$BGM_VOLUME[bgm];[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=$BGM_FADEOUT_SEC[aout]"
 
         when (subtitleMode) {
             SubtitleMode.HARD -> {
@@ -697,7 +660,7 @@ class MainActivity : AppCompatActivity() {
                 val vfValue = "subtitles=${subtitleFile.absolutePath}:" +
                     "fontsdir=${fontDir}:" +
                     "force_style='FontName=Source Han Sans CN Medium,FontSize=$SUBTITLE_FONT_SIZE,PrimaryColour=&H00FFFFFF," +
-                    "OutlineColour=&H00000000,Outline=1,Shadow=0,MarginV=16'"
+                    "OutlineColour=&H00000000,Outline=$SUBTITLE_OUTLINE,Shadow=$SUBTITLE_SHADOW,MarginV=$SUBTITLE_MARGIN_V'"
 
                 val args = if (useHwEncoder) {
                     arrayOf(
@@ -706,7 +669,7 @@ class MainActivity : AppCompatActivity() {
                         "-filter_complex", "[0:v]${vfValue}[vout];$audioFilter",
                         "-map", "[vout]", "-map", "[aout]",
                         "-c:v", "h264_mediacodec", "-b:v", "2M",
-                        "-c:a", "aac", "-b:a", "128k",
+                        "-c:a", "aac", "-b:a", AUDIO_BITRATE,
                         "-y", finalOutput.absolutePath
                     )
                 } else {
@@ -716,7 +679,7 @@ class MainActivity : AppCompatActivity() {
                         "-filter_complex", "[0:v]${vfValue}[vout];$audioFilter",
                         "-map", "[vout]", "-map", "[aout]",
                         "-c:v", "libx264", "-preset", preset, "-crf", crf.toString(),
-                        "-c:a", "aac", "-b:a", "128k",
+                        "-c:a", "aac", "-b:a", AUDIO_BITRATE,
                         "-y", finalOutput.absolutePath
                     )
                 }
@@ -734,7 +697,7 @@ class MainActivity : AppCompatActivity() {
                     "-i", subtitleFile.absolutePath,
                     "-filter_complex", audioFilter,
                     "-map", "0:v", "-map", "[aout]", "-map", "2",
-                    "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-c:s", "mov_text",
+                    "-c:v", "copy", "-c:a", "aac", "-b:a", AUDIO_BITRATE, "-c:s", "mov_text",
                     "-y", finalOutput.absolutePath
                 )
                 val ok = withContext(Dispatchers.IO) { executeFFmpegArgs(args) }
@@ -750,7 +713,7 @@ class MainActivity : AppCompatActivity() {
                     "-stream_loop", "-1", "-i", bgmFile.absolutePath,
                     "-filter_complex", audioFilter,
                     "-map", "0:v", "-map", "[aout]",
-                    "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+                    "-c:v", "copy", "-c:a", "aac", "-b:a", AUDIO_BITRATE,
                     "-y", finalOutput.absolutePath
                 )
                 val ok = withContext(Dispatchers.IO) { executeFFmpegArgs(args) }
