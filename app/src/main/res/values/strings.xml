@@ -20,6 +20,12 @@
     <string name="subtitle_soft">软字幕</string>
     <string name="subtitle_none">无字幕</string>
 
+    <!-- 动效模式 -->
+    <string name="label_motion_mode">图片动效:</string>
+    <string name="motion_none">无动效</string>
+    <string name="motion_subtle">轻微</string>
+    <string name="motion_dramatic">明显</string>
+
     <!-- 按钮 -->
     <string name="btn_start">开始合成测试</string>
     <string name="btn_cancel">取消</string>

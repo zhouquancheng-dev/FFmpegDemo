@@ -201,6 +201,48 @@
                         android:textSize="13sp" />
                 </RadioGroup>
 
+                <!-- 图片动效 -->
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/label_motion_mode"
+                    android:textColor="?attr/colorOnSurfaceVariant"
+                    android:textSize="13sp" />
+
+                <RadioGroup
+                    android:id="@+id/rgMotionMode"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:orientation="horizontal">
+
+                    <RadioButton
+                        android:id="@+id/rbMotionNone"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/motion_none"
+                        android:textSize="13sp" />
+
+                    <RadioButton
+                        android:id="@+id/rbMotionSubtle"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:checked="true"
+                        android:text="@string/motion_subtle"
+                        android:textSize="13sp" />
+
+                    <RadioButton
+                        android:id="@+id/rbMotionDramatic"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/motion_dramatic"
+                        android:textSize="13sp" />
+                </RadioGroup>
+
                 <!-- 编码器选择 -->
                 <com.google.android.material.materialswitch.MaterialSwitch
                     android:id="@+id/switchHwEncoder"

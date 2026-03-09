@@ -39,6 +39,7 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "FFmpegDemo"
         private const val SUBTITLE_FONT_SIZE = 10
+        private const val TARGET_FPS = 25
     }
 
     private lateinit var tvDeviceInfo: TextView
@@ -56,6 +57,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var actvPreset: AutoCompleteTextView
     private lateinit var sliderCrf: Slider
     private lateinit var rgSubtitleMode: RadioGroup
+    private lateinit var rgMotionMode: RadioGroup
     private lateinit var switchHwEncoder: MaterialSwitch
 
     private var currentSessionId = -1L
@@ -74,6 +76,7 @@ class MainActivity : AppCompatActivity() {
         val workDir: File,
         val segmentTexts: List<String>,
         val fontFile: File,
+        val bgmFile: File,
         val finalOutput: File
     )
 
@@ -137,6 +140,7 @@ class MainActivity : AppCompatActivity() {
         actvPreset = findViewById(R.id.actvPreset)
         sliderCrf = findViewById(R.id.sliderCrf)
         rgSubtitleMode = findViewById(R.id.rgSubtitleMode)
+        rgMotionMode = findViewById(R.id.rgMotionMode)
         switchHwEncoder = findViewById(R.id.switchHwEncoder)
     }
 
@@ -207,6 +211,11 @@ class MainActivity : AppCompatActivity() {
             R.id.rbSoftSub -> SubtitleMode.SOFT
             else -> SubtitleMode.NONE
         }
+        val motionMode = when (rgMotionMode.checkedRadioButtonId) {
+            R.id.rbMotionSubtle -> MotionMode.SUBTLE
+            R.id.rbMotionDramatic -> MotionMode.DRAMATIC
+            else -> MotionMode.NONE
+        }
 
         lifecycleScope.launch {
             try {
@@ -215,7 +224,7 @@ class MainActivity : AppCompatActivity() {
                 val segCount = files.segmentTexts.size
                 appendLog("资源准备完成 (${formatDuration(System.currentTimeMillis() - prepareStart)}), 片段: $segCount")
 
-                runFFmpeg(files, preset, crf, subtitleMode)
+                runFFmpeg(files, preset, crf, subtitleMode, motionMode)
             } catch (e: Exception) {
                 Log.e(TAG, "合成异常", e)
                 appendLog("错误: ${e.message}")
@@ -267,8 +276,12 @@ class MainActivity : AppCompatActivity() {
         val fontFile = File(workDir, "font.otf")
         if (!fontFile.exists()) copyAsset("data/font.otf", workDir)
 
+        // 复制背景音乐到工作目录
+        val bgmFile = File(workDir, "a_litte_story.mp3")
+        if (!bgmFile.exists()) copyAsset("data/a_litte_story.mp3", workDir)
+
         val finalOutput = File(workDir, "output.mp4")
-        WorkFiles(workDir, segmentTexts, fontFile, finalOutput)
+        WorkFiles(workDir, segmentTexts, fontFile, bgmFile, finalOutput)
     }
 
     private fun copyAsset(assetName: String, destDir: File): File {
@@ -287,6 +300,7 @@ class MainActivity : AppCompatActivity() {
         val srtFile = File(workDir, "subtitles.srt")
         val sb = StringBuilder()
         var offsetMs = 0L
+        var srtIndex = 1
 
         // 从第一个片段探测视频尺寸，计算每行最大字符数
         val maxChars = calcMaxCharsPerLine(File(workDir, "segment_1.mp4"))
@@ -298,16 +312,65 @@ class MainActivity : AppCompatActivity() {
                 continue
             }
 
-            sb.appendLine(i)
-            sb.appendLine("${formatSrtTime(offsetMs)} --> ${formatSrtTime(offsetMs + durationMs)}")
-            sb.appendLine(wrapText(segmentTexts[i - 1], maxChars))
-            sb.appendLine()
+            // 按标点拆分成多条短句，每条独立分配时间
+            val sentences = splitBySentence(segmentTexts[i - 1], maxChars)
+            val totalChars = sentences.sumOf { it.length }.coerceAtLeast(1)
 
-            offsetMs += durationMs
+            for (sentence in sentences) {
+                val sentenceMs = (durationMs * sentence.length / totalChars.toDouble()).toLong()
+                sb.appendLine(srtIndex++)
+                sb.appendLine("${formatSrtTime(offsetMs)} --> ${formatSrtTime(offsetMs + sentenceMs)}")
+                sb.appendLine(sentence)
+                sb.appendLine()
+                offsetMs += sentenceMs
+            }
         }
 
         srtFile.writeText(sb.toString())
         return srtFile
+    }
+
+    /**
+     * 按标点将文本拆成多条短句，每条不超过 maxChars
+     * 优先在句末标点处断句，其次在逗号等停顿处断
+     */
+    private fun splitBySentence(text: String, maxChars: Int): List<String> {
+        if (text.length <= maxChars) return listOf(text)
+
+        val breakPunctuation = setOf('，', '。', '、', '；', '！', '？', ',', '.', '!', '?')
+        val sentences = mutableListOf<String>()
+        var start = 0
+
+        while (start < text.length) {
+            val remaining = text.length - start
+            if (remaining <= maxChars) {
+                sentences.add(text.substring(start).trim())
+                break
+            }
+            // 从 maxChars 往前找最近的标点断句
+            var breakAt = -1
+            for (j in (start + maxChars - 1) downTo start) {
+                if (text[j] in breakPunctuation) {
+                    breakAt = j + 1
+                    break
+                }
+            }
+            // 没找到标点，从 maxChars 往后找
+            if (breakAt == -1) {
+                for (j in start + maxChars until text.length) {
+                    if (text[j] in breakPunctuation) {
+                        breakAt = j + 1
+                        break
+                    }
+                }
+            }
+            // 仍然没找到，强制在 maxChars 处断
+            if (breakAt == -1) breakAt = start + maxChars
+
+            sentences.add(text.substring(start, breakAt).trim())
+            start = breakAt
+        }
+        return sentences.filter { it.isNotEmpty() }
     }
 
     /**
@@ -322,7 +385,7 @@ class MainActivity : AppCompatActivity() {
                 val videoWidth = stream.width.toDouble()
                 val videoHeight = stream.height.toDouble()
                 val charPixelWidth = fontSize * videoHeight / 288.0
-                val usableWidth = videoWidth * 0.9
+                val usableWidth = videoWidth * 0.85
                 val calculated = (usableWidth / charPixelWidth).toInt()
                 if (calculated > 0) return calculated
             }
@@ -331,24 +394,119 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun wrapText(text: String, maxChars: Int): String {
-        if (text.length <= maxChars) return text
+        if ('\n' in text) return text                     // 已有换行符，不处理
+        if (text.length <= maxChars) return text           // 一行放得下
+
         val punctuation = setOf('，', '。', '、', '；', '！', '？', ',', '.', '!', '?')
-        val sb = StringBuilder()
-        var count = 0
-        for (ch in text) {
-            sb.append(ch)
-            count++
-            if (count >= maxChars && ch in punctuation) {
-                sb.append('\n')
-                count = 0
+
+        // ── 短文本（≤2行）：中点二分，两行等长更美观 ──
+        if (text.length <= maxChars * 2) {
+            val mid = text.length / 2
+            val searchRange = text.length / 4
+            var bestPos = -1
+            var minDist = Int.MAX_VALUE
+            for (i in (mid - searchRange).coerceAtLeast(0) until (mid + searchRange).coerceAtMost(text.length)) {
+                if (text[i] in punctuation) {
+                    val dist = kotlin.math.abs(i - mid)
+                    if (dist < minDist) {
+                        minDist = dist
+                        bestPos = i + 1   // 标点留在上行
+                    }
+                }
             }
+            // 找到标点就在那断，否则在中点强制断
+            val splitAt = if (bestPos != -1) bestPos else mid
+            return "${text.substring(0, splitAt).trim()}\n${text.substring(splitAt).trim()}"
         }
-        return sb.toString()
+
+        // ── 超长文本（>2行）：逐行填充兜底 ──
+        val hardLimit = maxChars + maxChars / 5
+        val lines = mutableListOf<String>()
+        var start = 0
+        while (start < text.length) {
+            if (text.length - start <= maxChars) {
+                lines.add(text.substring(start))
+                break
+            }
+            var breakAt = -1
+            val searchEnd = minOf(start + hardLimit, text.length)
+            for (i in start + maxChars - 1 until searchEnd) {
+                if (text[i] in punctuation) {
+                    breakAt = i + 1
+                    break
+                }
+            }
+            if (breakAt == -1) breakAt = minOf(start + hardLimit, text.length)
+            lines.add(text.substring(start, breakAt))
+            start = breakAt
+        }
+        return lines.joinToString("\n")
     }
 
     private fun getVideoDurationMs(file: File): Long {
         val info = FFprobeKit.getMediaInformation(file.absolutePath).mediaInformation ?: return -1
         return (info.duration.toDoubleOrNull()?.times(1000))?.toLong() ?: -1
+    }
+
+    private fun getAudioDurationSec(file: File): Double {
+        val info = FFprobeKit.getMediaInformation(file.absolutePath).mediaInformation ?: return 3.0
+        return info.duration.toDoubleOrNull() ?: 3.0
+    }
+
+    private fun getImageSize(file: File): Pair<Int, Int> {
+        val opts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeFile(file.absolutePath, opts)
+        val w = if (opts.outWidth > 0) opts.outWidth else 1280
+        val h = if (opts.outHeight > 0) opts.outHeight else 720
+        return Pair(w, h)
+    }
+
+    /**
+     * 生成随机图片动效滤镜（zoompan），相邻片段不重复
+     * @return Triple(滤镜字符串, 模板名称, 本次模板索引)
+     */
+    private fun getRandomMotionEffect(
+        durationSec: Double,
+        mode: MotionMode,
+        lastIndex: Int,
+        width: Int = 1280,
+        height: Int = 720
+    ): Triple<String, String, Int> {
+        val zoomRange = when (mode) {
+            MotionMode.SUBTLE -> 0.10
+            MotionMode.DRAMATIC -> 0.20
+            else -> 0.0
+        }
+
+        // 保持浮点精度，d=1 配合 -loop 1 逐帧处理
+        val totalFrames = (durationSec * TARGET_FPS).coerceAtLeast(1.0)
+        val s = "${width}x${height}"
+        // 缓动: ease-in-out  t=on/total → (sin(t*PI - PI/2)+1)/2
+        val ease = "((sin(on/$totalFrames*PI-PI/2)+1)/2)"
+
+        data class Template(val name: String, val filter: String)
+
+        // (width - iw*zoom)/2
+        val templates = listOf(
+            Template("中心放大",
+                "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=($width-iw*zoom)/2:y=($height-ih*zoom)/2:s=$s"),
+            Template("中心缩小",
+                "zoompan=z=1+${zoomRange}-${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=($width-iw*zoom)/2:y=($height-ih*zoom)/2:s=$s"),
+            Template("左移右",
+                "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=($width-iw*zoom)*($ease):y=($height-ih*zoom)/2:s=$s"),
+            Template("右移左",
+                "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=($width-iw*zoom)*(1-$ease):y=($height-ih*zoom)/2:s=$s"),
+            Template("上移下",
+                "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=($width-iw*zoom)/2:y=($height-ih*zoom)*($ease):s=$s"),
+            Template("下移上",
+                "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=($width-iw*zoom)/2:y=($height-ih*zoom)*(1-$ease):s=$s")
+        )
+
+        // 相邻不重复的随机选取
+        val candidates = templates.indices.filter { it != lastIndex }
+        val idx = candidates.random()
+        val t = templates[idx]
+        return Triple(t.filter, t.name, idx)
     }
 
     private fun formatSrtTime(ms: Long): String {
@@ -390,7 +548,8 @@ class MainActivity : AppCompatActivity() {
         files: WorkFiles,
         preset: String,
         crf: Int,
-        subtitleMode: SubtitleMode
+        subtitleMode: SubtitleMode,
+        motionMode: MotionMode = MotionMode.NONE
     ) {
         val startTime = System.currentTimeMillis()
         val workDir = files.workDir
@@ -403,13 +562,14 @@ class MainActivity : AppCompatActivity() {
 
         val encoderName = if (useHwEncoder) "h264_mediacodec (硬编码)" else "libx264 (软编码)"
         if (useHwEncoder) {
-            appendLog("编码器: $encoderName | 码率=2M, 字幕=${subtitleMode.label}")
+            appendLog("编码器: $encoderName | 码率=2M, 字幕=${subtitleMode.label}, 动效=${motionMode.label}")
         } else {
-            appendLog("编码器: $encoderName | preset=$preset, crf=$crf, 字幕=${subtitleMode.label}")
+            appendLog("编码器: $encoderName | preset=$preset, crf=$crf, 字幕=${subtitleMode.label}, 动效=${motionMode.label}")
         }
 
         // ── Step 1: 逐片段生成视频 ──
         appendLog("\n▶ 第一步: 生成各片段视频")
+        var lastMotionIndex = -1  // 用于相邻不重复
         for (i in 1..segCount) {
             updateProgress(i, totalSteps, "生成片段 $i/$segCount")
 
@@ -418,15 +578,47 @@ class MainActivity : AppCompatActivity() {
             val audioPath = File(segDir, "audio.wav").absolutePath
             val segOutputFile = File(workDir, "segment_$i.mp4")
 
+            // 有动效时，先探测音频时长和图片尺寸，生成滤镜
+            var motionFilter: String? = null
+            if (motionMode != MotionMode.NONE) {
+                val imageFile = File(segDir, "image.png")
+                val audioDurationSec = withContext(Dispatchers.IO) {
+                    getAudioDurationSec(File(segDir, "audio.wav"))
+                }
+                val imgSize = withContext(Dispatchers.IO) { getImageSize(imageFile) }
+                val result = getRandomMotionEffect(
+                    audioDurationSec, motionMode, lastMotionIndex,
+                    imgSize.first, imgSize.second
+                )
+                lastMotionIndex = result.third
+                motionFilter = result.first
+                appendLog("    动效: ${result.second}")
+            }
+
             val cmd = buildString {
-                append("-loop 1 ")
-                append("-i \"$imagePath\" ")
-                append("-i \"$audioPath\" ")
-                if (useHwEncoder) {
-                    append("-c:v h264_mediacodec -b:v 2M ")
+                if (motionFilter == null) {
+                    // 无动效：保持原逻辑
+                    append("-loop 1 ")
+                    append("-i \"$imagePath\" ")
+                    append("-i \"$audioPath\" ")
+                    if (useHwEncoder) {
+                        append("-c:v h264_mediacodec -b:v 2M ")
+                    } else {
+                        append("-c:v libx264 -tune stillimage ")
+                        append("-preset $preset -crf $crf ")
+                    }
                 } else {
-                    append("-c:v libx264 -tune stillimage ")
-                    append("-preset $preset -crf $crf ")
+                    // 有动效：-loop 1 + d=1 逐帧处理
+                    append("-loop 1 ")
+                    append("-i \"$imagePath\" ")
+                    append("-i \"$audioPath\" ")
+                    append("-vf \"$motionFilter\" ")
+                    if (useHwEncoder) {
+                        append("-c:v h264_mediacodec -b:v 2M ")
+                    } else {
+                        append("-c:v libx264 ")
+                        append("-preset $preset -crf $crf ")
+                    }
                 }
                 append("-c:a aac -b:a 128k ")
                 append("-pix_fmt yuv420p ")
@@ -482,12 +674,16 @@ class MainActivity : AppCompatActivity() {
         }
         appendLog("  完成 ${formatDuration(concatTime)}  ${formatSize(concatenatedFile.length())}")
 
-        // ── Step 3: 字幕处理 ──
-        updateProgress(segCount + 2, totalSteps, "字幕处理")
-        appendLog("\n▶ 第三步: 字幕处理 (${subtitleMode.label})")
+        // ── Step 3: 字幕 + BGM 混音 ──
+        updateProgress(segCount + 2, totalSteps, "字幕 + BGM 混音")
+        appendLog("\n▶ 第三步: 字幕处理 (${subtitleMode.label}) + BGM 混音")
 
         val finalOutput = files.finalOutput
+        val bgmFile = files.bgmFile
         val subStart = System.currentTimeMillis()
+
+        // BGM 混音滤镜：BGM 循环播放、音量 30%，以视频时长为准
+        val audioFilter = "[1:a]volume=0.3[bgm];[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]"
 
         when (subtitleMode) {
             SubtitleMode.HARD -> {
@@ -500,50 +696,71 @@ class MainActivity : AppCompatActivity() {
                 val args = if (useHwEncoder) {
                     arrayOf(
                         "-i", concatenatedFile.absolutePath,
-                        "-vf", vfValue,
+                        "-stream_loop", "-1", "-i", bgmFile.absolutePath,
+                        "-filter_complex", "[0:v]${vfValue}[vout];$audioFilter",
+                        "-map", "[vout]", "-map", "[aout]",
                         "-c:v", "h264_mediacodec", "-b:v", "2M",
-                        "-c:a", "copy",
+                        "-c:a", "aac", "-b:a", "128k",
                         "-y", finalOutput.absolutePath
                     )
                 } else {
                     arrayOf(
                         "-i", concatenatedFile.absolutePath,
-                        "-vf", vfValue,
+                        "-stream_loop", "-1", "-i", bgmFile.absolutePath,
+                        "-filter_complex", "[0:v]${vfValue}[vout];$audioFilter",
+                        "-map", "[vout]", "-map", "[aout]",
                         "-c:v", "libx264", "-preset", preset, "-crf", crf.toString(),
-                        "-c:a", "copy",
+                        "-c:a", "aac", "-b:a", "128k",
                         "-y", finalOutput.absolutePath
                     )
                 }
                 val ok = withContext(Dispatchers.IO) { executeFFmpegArgs(args) }
                 if (!ok || !finalOutput.exists() || finalOutput.length() == 0L) {
-                    appendLog("  ✗ 硬字幕烧录失败")
-                    runOnUiThread { onSynthesisFinished(false, "硬字幕烧录失败") }
+                    appendLog("  ✗ 硬字幕烧录 + BGM 混音失败")
+                    runOnUiThread { onSynthesisFinished(false, "硬字幕烧录 + BGM 混音失败") }
                     return
                 }
             }
             SubtitleMode.SOFT -> {
                 val args = arrayOf(
                     "-i", concatenatedFile.absolutePath,
+                    "-stream_loop", "-1", "-i", bgmFile.absolutePath,
                     "-i", subtitleFile.absolutePath,
-                    "-map", "0:v", "-map", "0:a", "-map", "1",
-                    "-c:v", "copy", "-c:a", "copy", "-c:s", "mov_text",
+                    "-filter_complex", audioFilter,
+                    "-map", "0:v", "-map", "[aout]", "-map", "2",
+                    "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-c:s", "mov_text",
                     "-y", finalOutput.absolutePath
                 )
                 val ok = withContext(Dispatchers.IO) { executeFFmpegArgs(args) }
                 if (!ok || !finalOutput.exists() || finalOutput.length() == 0L) {
-                    appendLog("  ✗ 软字幕封装失败")
-                    runOnUiThread { onSynthesisFinished(false, "软字幕封装失败") }
+                    appendLog("  ✗ 软字幕封装 + BGM 混音失败")
+                    runOnUiThread { onSynthesisFinished(false, "软字幕封装 + BGM 混音失败") }
                     return
                 }
             }
             SubtitleMode.NONE -> {
-                withContext(Dispatchers.IO) {
-                    concatenatedFile.copyTo(finalOutput, overwrite = true)
+                val args = arrayOf(
+                    "-i", concatenatedFile.absolutePath,
+                    "-stream_loop", "-1", "-i", bgmFile.absolutePath,
+                    "-filter_complex", audioFilter,
+                    "-map", "0:v", "-map", "[aout]",
+                    "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+                    "-y", finalOutput.absolutePath
+                )
+                val ok = withContext(Dispatchers.IO) { executeFFmpegArgs(args) }
+                if (!ok || !finalOutput.exists() || finalOutput.length() == 0L) {
+                    appendLog("  ✗ BGM 混音失败")
+                    runOnUiThread { onSynthesisFinished(false, "BGM 混音失败") }
+                    return
                 }
             }
         }
         subtitleTime = System.currentTimeMillis() - subStart
         appendLog("  完成 ${formatDuration(subtitleTime)}  ${formatSize(finalOutput.length())}")
+
+        // ── 输出 SRT 内容供调试查看 ──
+        appendLog("\n═══════════ SRT 字幕内容 ═══════════")
+        appendLog(subtitleFile.readText().trimEnd())
 
         // ── 清理中间文件 ──
         withContext(Dispatchers.IO) {
@@ -564,14 +781,14 @@ class MainActivity : AppCompatActivity() {
         appendLog("\n═══════════ 耗时分析 ═══════════")
         appendLog("片段编码: ${formatDuration(segTotal)} (${pct(segTotal, totalDuration)}) 均${formatDuration(segAvg)}")
         appendLog("拼接:     ${formatDuration(concatTime)} (${pct(concatTime, totalDuration)})")
-        appendLog("字幕:     ${formatDuration(subtitleTime)} (${pct(subtitleTime, totalDuration)})")
+        appendLog("字幕+BGM: ${formatDuration(subtitleTime)} (${pct(subtitleTime, totalDuration)})")
         appendLog("总耗时:   ${formatDuration(totalDuration)}")
         appendLog("输出:     ${formatSize(outputSize)}")
 
-        Log.i(TAG, "合成完成: ${totalDuration}ms, 编码${segTotal}ms, 拼接${concatTime}ms, 字幕${subtitleTime}ms, ${outputSize}bytes")
+        Log.i(TAG, "合成完成: ${totalDuration}ms, 编码${segTotal}ms, 拼接${concatTime}ms, 字幕+BGM${subtitleTime}ms, ${outputSize}bytes")
 
         val resultInfo = buildResultInfo(
-            totalDuration, preset, crf, subtitleMode, outputSize, files,
+            totalDuration, preset, crf, subtitleMode, motionMode, outputSize, files,
             segmentTimes, concatTime, subtitleTime
         )
         runOnUiThread { onSynthesisFinished(true, resultInfo, finalOutput) }
@@ -595,6 +812,7 @@ class MainActivity : AppCompatActivity() {
         preset: String,
         crf: Int,
         subtitleMode: SubtitleMode,
+        motionMode: MotionMode,
         outputSize: Long,
         files: WorkFiles,
         segmentTimes: List<Long>,
@@ -613,7 +831,7 @@ class MainActivity : AppCompatActivity() {
             appendLine("片段编码: ${formatDuration(segTotal)} (${pct(segTotal, durationMs)})")
             appendLine("  平均每片: ${formatDuration(segAvg)}")
             appendLine("拼接: ${formatDuration(concatTime)} (${pct(concatTime, durationMs)})")
-            appendLine("字幕: ${formatDuration(subtitleTime)} (${pct(subtitleTime, durationMs)})")
+            appendLine("字幕+BGM: ${formatDuration(subtitleTime)} (${pct(subtitleTime, durationMs)})")
             appendLine()
             appendLine("--- 编码参数 ---")
             appendLine("编码器: ${if (useHwEncoder) "h264_mediacodec (硬编码)" else "libx264 (软编码)"}")
@@ -624,6 +842,7 @@ class MainActivity : AppCompatActivity() {
                 appendLine("CRF: $crf")
             }
             appendLine("字幕模式: ${subtitleMode.label}")
+            appendLine("图片动效: ${motionMode.label}")
             appendLine()
             appendLine("--- 文件信息 ---")
             appendLine("片段数: ${files.segmentTexts.size}")
@@ -716,5 +935,11 @@ class MainActivity : AppCompatActivity() {
         HARD("硬字幕(烧录)"),
         SOFT("软字幕(封装)"),
         NONE("无字幕")
+    }
+
+    enum class MotionMode(val label: String) {
+        NONE("无动效"),
+        SUBTLE("轻微"),
+        DRAMATIC("明显")
     }
 }
