@@ -1,5 +1,6 @@
 package com.example.ffmpegdemo
 
+import android.annotation.SuppressLint
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -72,6 +73,7 @@ class MainActivity : AppCompatActivity() {
         val finalOutput: File
     )
 
+    @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -92,6 +94,12 @@ class MainActivity : AppCompatActivity() {
         setupPresetSpinner()
         setupCrfSlider()
         setupButtons()
+
+        // 日志区触摸时阻止外层 NestedScrollView 拦截，使内层可独立滚动
+        scrollLog.setOnTouchListener { v, _ ->
+            v.parent.requestDisallowInterceptTouchEvent(true)
+            false
+        }
     }
 
     private fun initViews() {
@@ -199,10 +207,11 @@ class MainActivity : AppCompatActivity() {
         val workDir = File(filesDir, "ffmpeg_work")
         workDir.mkdirs()
 
-        // 清理上次的输出视频和中间文件
+        // 清理中间文件（输出文件用固定名，FFmpeg -y 自动覆盖）
         workDir.listFiles()?.forEach { f ->
-            if (f.isFile && (f.name.startsWith("output_") || f.name.startsWith("segment_")
-                        || f.name == "concatenated.mp4" || f.name == "concat_list.txt")) {
+            if (f.isFile && (f.name.startsWith("segment_")
+                        || f.name == "concatenated.mp4" || f.name == "concat_list.txt"
+                        || f.name == "subtitles.srt")) {
                 f.delete()
             }
         }
@@ -229,7 +238,7 @@ class MainActivity : AppCompatActivity() {
         val fontFile = File(workDir, "font.otf")
         if (!fontFile.exists()) copyAsset("data/font.otf", workDir)
 
-        val finalOutput = File(workDir, "output_${System.currentTimeMillis()}.mp4")
+        val finalOutput = File(workDir, "output.mp4")
         WorkFiles(workDir, segmentTexts, fontFile, finalOutput)
     }
 
