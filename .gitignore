@@ -18,6 +18,7 @@ local.properties
 app/priguardMapping.txt
 app/mediation_location_version.txt
 wrapper
+app/build
 
 # Claude Code temp files
 tmpclaude-*-cwd
