@@ -20,6 +20,7 @@ import com.arthenica.ffmpegkit.FFprobeKit
 import com.arthenica.ffmpegkit.ReturnCode
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
+import com.google.android.material.materialswitch.MaterialSwitch
 import com.google.android.material.progressindicator.LinearProgressIndicator
 import com.google.android.material.slider.Slider
 import kotlinx.coroutines.Dispatchers
@@ -37,6 +38,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "FFmpegDemo"
+        private const val SUBTITLE_FONT_SIZE = 10
     }
 
     private lateinit var tvDeviceInfo: TextView
@@ -54,9 +56,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var actvPreset: AutoCompleteTextView
     private lateinit var sliderCrf: Slider
     private lateinit var rgSubtitleMode: RadioGroup
+    private lateinit var switchHwEncoder: MaterialSwitch
 
     private var currentSessionId = -1L
     private var isRunning = false
+    private var hwEncoderSupported = false
     private var useHwEncoder = false
     private var pendingScroll = false
     private var outputFile: File? = null
@@ -101,18 +105,19 @@ class MainActivity : AppCompatActivity() {
             false
         }
 
-        // 异步检测硬件编码器，更新设备信息并隐藏软编码参数
+        // 异步检测硬件编码器，初始化开关状态
         lifecycleScope.launch {
-            useHwEncoder = withContext(Dispatchers.IO) { detectHwEncoder() }
-            val hwStatus = if (useHwEncoder) "支持" else "不支持"
+            hwEncoderSupported = withContext(Dispatchers.IO) { detectHwEncoder() }
+            val hwStatus = if (hwEncoderSupported) "支持" else "不支持"
             tvDeviceInfo.append("\n硬编码: $hwStatus (h264_mediacodec)")
-            if (useHwEncoder) {
-                val gone = View.GONE
-                findViewById<View>(R.id.labelPreset).visibility = gone
-                findViewById<View>(R.id.tilPreset).visibility = gone
-                findViewById<View>(R.id.labelCrf).visibility = gone
-                findViewById<View>(R.id.layoutCrf).visibility = gone
-            }
+
+            switchHwEncoder.isEnabled = hwEncoderSupported
+            switchHwEncoder.isChecked = hwEncoderSupported
+            updateSoftEncodeParamsVisibility(!hwEncoderSupported)
+        }
+
+        switchHwEncoder.setOnCheckedChangeListener { _, isChecked ->
+            updateSoftEncodeParamsVisibility(!isChecked)
         }
     }
 
@@ -132,6 +137,7 @@ class MainActivity : AppCompatActivity() {
         actvPreset = findViewById(R.id.actvPreset)
         sliderCrf = findViewById(R.id.sliderCrf)
         rgSubtitleMode = findViewById(R.id.rgSubtitleMode)
+        switchHwEncoder = findViewById(R.id.switchHwEncoder)
     }
 
     private fun showDeviceInfo() {
@@ -149,6 +155,14 @@ class MainActivity : AppCompatActivity() {
             appendLine("Android: ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
             append("可用内存: ${maxMem}MB")
         }
+    }
+
+    private fun updateSoftEncodeParamsVisibility(visible: Boolean) {
+        val visibility = if (visible) View.VISIBLE else View.GONE
+        findViewById<View>(R.id.labelPreset).visibility = visibility
+        findViewById<View>(R.id.tilPreset).visibility = visibility
+        findViewById<View>(R.id.labelCrf).visibility = visibility
+        findViewById<View>(R.id.layoutCrf).visibility = visibility
     }
 
     private fun setupPresetSpinner() {
@@ -185,6 +199,7 @@ class MainActivity : AppCompatActivity() {
         tvLog.text = ""
         outputFile = null
 
+        useHwEncoder = switchHwEncoder.isChecked
         val preset = actvPreset.text.toString()
         val crf = sliderCrf.value.toInt()
         val subtitleMode = when (rgSubtitleMode.checkedRadioButtonId) {
@@ -273,6 +288,9 @@ class MainActivity : AppCompatActivity() {
         val sb = StringBuilder()
         var offsetMs = 0L
 
+        // 从第一个片段探测视频尺寸，计算每行最大字符数
+        val maxChars = calcMaxCharsPerLine(File(workDir, "segment_1.mp4"))
+
         for (i in 1..segmentTexts.size) {
             val durationMs = getVideoDurationMs(File(workDir, "segment_$i.mp4"))
             if (durationMs <= 0) {
@@ -282,7 +300,7 @@ class MainActivity : AppCompatActivity() {
 
             sb.appendLine(i)
             sb.appendLine("${formatSrtTime(offsetMs)} --> ${formatSrtTime(offsetMs + durationMs)}")
-            sb.appendLine(wrapText(segmentTexts[i - 1], 18))
+            sb.appendLine(wrapText(segmentTexts[i - 1], maxChars))
             sb.appendLine()
 
             offsetMs += durationMs
@@ -290,6 +308,26 @@ class MainActivity : AppCompatActivity() {
 
         srtFile.writeText(sb.toString())
         return srtFile
+    }
+
+    /**
+     * 根据视频尺寸和字幕 FontSize 计算每行最大字符数
+     * libass 默认 PlayResY=288，中文字符近似等宽（宽≈高）
+     */
+    private fun calcMaxCharsPerLine(videoFile: File, fontSize: Int = SUBTITLE_FONT_SIZE): Int {
+        val info = FFprobeKit.getMediaInformation(videoFile.absolutePath).mediaInformation
+        if (info != null) {
+            val stream = info.streams?.firstOrNull { it.width != null && it.height != null }
+            if (stream != null) {
+                val videoWidth = stream.width.toDouble()
+                val videoHeight = stream.height.toDouble()
+                val charPixelWidth = fontSize * videoHeight / 288.0
+                val usableWidth = videoWidth * 0.9
+                val calculated = (usableWidth / charPixelWidth).toInt()
+                if (calculated > 0) return calculated
+            }
+        }
+        return 20
     }
 
     private fun wrapText(text: String, maxChars: Int): String {
@@ -364,7 +402,11 @@ class MainActivity : AppCompatActivity() {
         var subtitleTime: Long
 
         val encoderName = if (useHwEncoder) "h264_mediacodec (硬编码)" else "libx264 (软编码)"
-        appendLog("编码器: $encoderName | preset=$preset, crf=$crf, 字幕=${subtitleMode.label}")
+        if (useHwEncoder) {
+            appendLog("编码器: $encoderName | 码率=2M, 字幕=${subtitleMode.label}")
+        } else {
+            appendLog("编码器: $encoderName | preset=$preset, crf=$crf, 字幕=${subtitleMode.label}")
+        }
 
         // ── Step 1: 逐片段生成视频 ──
         appendLog("\n▶ 第一步: 生成各片段视频")
@@ -452,7 +494,7 @@ class MainActivity : AppCompatActivity() {
                 val fontDir = files.fontFile.parentFile!!.absolutePath
                 val vfValue = "subtitles=${subtitleFile.absolutePath}:" +
                     "fontsdir=${fontDir}:" +
-                    "force_style='FontName=Source Han Sans CN Medium,FontSize=10,PrimaryColour=&H00FFFFFF," +
+                    "force_style='FontName=Source Han Sans CN Medium,FontSize=$SUBTITLE_FONT_SIZE,PrimaryColour=&H00FFFFFF," +
                     "OutlineColour=&H00000000,Outline=1,Shadow=0,MarginV=16'"
 
                 val args = if (useHwEncoder) {
@@ -574,10 +616,14 @@ class MainActivity : AppCompatActivity() {
             appendLine("字幕: ${formatDuration(subtitleTime)} (${pct(subtitleTime, durationMs)})")
             appendLine()
             appendLine("--- 编码参数 ---")
-            appendLine("Preset: $preset")
-            appendLine("CRF: $crf")
-            appendLine("字幕模式: ${subtitleMode.label}")
             appendLine("编码器: ${if (useHwEncoder) "h264_mediacodec (硬编码)" else "libx264 (软编码)"}")
+            if (useHwEncoder) {
+                appendLine("码率: 2M")
+            } else {
+                appendLine("Preset: $preset")
+                appendLine("CRF: $crf")
+            }
+            appendLine("字幕模式: ${subtitleMode.label}")
             appendLine()
             appendLine("--- 文件信息 ---")
             appendLine("片段数: ${files.segmentTexts.size}")

@@ -200,6 +200,18 @@
                         android:text="@string/subtitle_none"
                         android:textSize="13sp" />
                 </RadioGroup>
+
+                <!-- 编码器选择 -->
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchHwEncoder"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/label_hw_encoder"
+                    android:textSize="13sp"
+                    android:textColor="?attr/colorOnSurfaceVariant"
+                    android:enabled="false" />
+
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 

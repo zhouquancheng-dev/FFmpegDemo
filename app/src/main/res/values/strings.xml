@@ -14,8 +14,10 @@
     <string name="label_ffmpeg_log">FFmpeg 日志</string>
 
     <!-- 字幕模式 -->
-    <string name="subtitle_hard">硬字幕(烧录)</string>
-    <string name="subtitle_soft">软字幕(封装)</string>
+    <string name="label_hw_encoder">使用硬件编码 (h264_mediacodec)</string>
+
+    <string name="subtitle_hard">硬字幕</string>
+    <string name="subtitle_soft">软字幕</string>
     <string name="subtitle_none">无字幕</string>
 
     <!-- 按钮 -->
