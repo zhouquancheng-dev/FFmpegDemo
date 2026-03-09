@@ -5,19 +5,27 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.util.TypedValue
 import android.view.View
 import android.widget.*
+import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import com.arthenica.ffmpegkit.FFmpegKit
+import com.arthenica.ffmpegkit.FFprobeKit
 import com.arthenica.ffmpegkit.ReturnCode
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
+import com.google.android.material.progressindicator.LinearProgressIndicator
+import com.google.android.material.slider.Slider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import java.io.File
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
@@ -40,34 +48,49 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnStart: MaterialButton
     private lateinit var btnCancel: MaterialButton
     private lateinit var btnPlayVideo: MaterialButton
-    private lateinit var progressBar: ProgressBar
+    private lateinit var progressBar: LinearProgressIndicator
     private lateinit var cardResult: MaterialCardView
-    private lateinit var spinnerPreset: Spinner
-    private lateinit var seekBarCrf: SeekBar
+    private lateinit var actvPreset: AutoCompleteTextView
+    private lateinit var sliderCrf: Slider
     private lateinit var rgSubtitleMode: RadioGroup
 
-    private var currentSessionId: Long = -1
+    private var currentSessionId = -1L
     private var isRunning = false
+    private var useHwEncoder = false
+    private var pendingScroll = false
     private var outputFile: File? = null
-
-    private val segmentCount = 18
-    private val totalSteps get() = segmentCount + 2
 
     private val presets = arrayOf(
         "ultrafast", "superfast", "veryfast", "faster",
         "fast", "medium", "slow", "slower", "veryslow"
     )
 
-    data class WorkFiles(val workDir: File, val subtitleFile: File, val finalOutput: File)
+    data class WorkFiles(
+        val workDir: File,
+        val segmentTexts: List<String>,
+        val fontFile: File,
+        val finalOutput: File
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         setContentView(R.layout.activity_main)
+        ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.main)) { v, insets ->
+            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
+            insets
+        }
+        val surfaceColor = TypedValue().let { tv ->
+            theme.resolveAttribute(com.google.android.material.R.attr.colorSurface, tv, true)
+            tv.data
+        }
+        addSystemBarsColorUpdate(surfaceColor, true)
 
         initViews()
         showDeviceInfo()
         setupPresetSpinner()
-        setupCrfSeekBar()
+        setupCrfSlider()
         setupButtons()
     }
 
@@ -84,8 +107,8 @@ class MainActivity : AppCompatActivity() {
         btnPlayVideo = findViewById(R.id.btnPlayVideo)
         progressBar = findViewById(R.id.progressBar)
         cardResult = findViewById(R.id.cardResult)
-        spinnerPreset = findViewById(R.id.spinnerPreset)
-        seekBarCrf = findViewById(R.id.seekBarCrf)
+        actvPreset = findViewById(R.id.actvPreset)
+        sliderCrf = findViewById(R.id.sliderCrf)
         rgSubtitleMode = findViewById(R.id.rgSubtitleMode)
     }
 
@@ -94,7 +117,7 @@ class MainActivity : AppCompatActivity() {
         val cores = Runtime.getRuntime().availableProcessors()
         val maxMem = Runtime.getRuntime().maxMemory() / 1024 / 1024
 
-        val info = buildString {
+        tvDeviceInfo.text = buildString {
             appendLine("型号: ${Build.MODEL}")
             appendLine("品牌: ${Build.BRAND}")
             appendLine("芯片: ${Build.HARDWARE}")
@@ -104,24 +127,18 @@ class MainActivity : AppCompatActivity() {
             appendLine("Android: ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
             append("可用内存: ${maxMem}MB")
         }
-        tvDeviceInfo.text = info
     }
 
     private fun setupPresetSpinner() {
-        val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, presets)
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-        spinnerPreset.adapter = adapter
-        spinnerPreset.setSelection(5)
+        val adapter = ArrayAdapter(this, android.R.layout.simple_dropdown_item_1line, presets)
+        actvPreset.setAdapter(adapter)
+        actvPreset.setText(presets[5], false)
     }
 
-    private fun setupCrfSeekBar() {
-        seekBarCrf.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                tvCrfValue.text = progress.toString()
-            }
-            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
-        })
+    private fun setupCrfSlider() {
+        sliderCrf.addOnChangeListener { _, value, _ ->
+            tvCrfValue.text = value.toInt().toString()
+        }
     }
 
     private fun setupButtons() {
@@ -146,8 +163,8 @@ class MainActivity : AppCompatActivity() {
         tvLog.text = ""
         outputFile = null
 
-        val preset = presets[spinnerPreset.selectedItemPosition]
-        val crf = seekBarCrf.progress
+        val preset = actvPreset.text.toString()
+        val crf = sliderCrf.value.toInt()
         val subtitleMode = when (rgSubtitleMode.checkedRadioButtonId) {
             R.id.rbHardSub -> SubtitleMode.HARD
             R.id.rbSoftSub -> SubtitleMode.SOFT
@@ -158,16 +175,13 @@ class MainActivity : AppCompatActivity() {
             try {
                 val prepareStart = System.currentTimeMillis()
                 val files = prepareAssets()
-                val prepareCost = System.currentTimeMillis() - prepareStart
-                appendLog("=== 资源准备完成 (耗时 ${formatDuration(prepareCost)}) ===")
-                appendLog("片段数: $segmentCount")
-                appendLog("字幕: ${files.subtitleFile.name} (${files.subtitleFile.length()}B)")
-                appendLog("")
+                val segCount = files.segmentTexts.size
+                appendLog("资源准备完成 (${formatDuration(System.currentTimeMillis() - prepareStart)}), 片段: $segCount")
 
                 runFFmpeg(files, preset, crf, subtitleMode)
             } catch (e: Exception) {
-                appendLog("错误: ${e.message}")
                 Log.e(TAG, "合成异常", e)
+                appendLog("错误: ${e.message}")
                 runOnUiThread { onSynthesisFinished(false, "") }
             }
         }
@@ -176,7 +190,7 @@ class MainActivity : AppCompatActivity() {
     private fun cancelSynthesis() {
         if (currentSessionId != -1L) {
             FFmpegKit.cancel(currentSessionId)
-            appendLog("\n=== 用户取消 ===")
+            appendLog("=== 用户取消 ===")
         }
         onSynthesisFinished(false, getString(R.string.status_cancelled))
     }
@@ -190,22 +204,33 @@ class MainActivity : AppCompatActivity() {
             if (f.isFile && (f.name.startsWith("output_") || f.name.startsWith("segment_")
                         || f.name == "concatenated.mp4" || f.name == "concat_list.txt")) {
                 f.delete()
-                Log.d(TAG, "清理旧文件: ${f.name}")
             }
         }
 
-        for (i in 1..segmentCount) {
-            val segDir = File(workDir, "seg_$i")
-            segDir.mkdirs()
-            copyAsset("data/$i/image.png", segDir)
-            copyAsset("data/$i/audio.wav", segDir)
+        // 从 segments.json 读取片段信息，动态确定片段数
+        val jsonStr = assets.open("data/segments.json").bufferedReader().use { it.readText() }
+        val jsonArray = JSONArray(jsonStr)
+        val segmentTexts = mutableListOf<String>()
+        for (i in 0 until jsonArray.length()) {
+            val raw = jsonArray.getJSONObject(i).getString("text")
+            segmentTexts.add(raw.replace(Regex("^=+\\s*\\n\\n"), ""))
         }
 
-        val subtitleFile = copyAsset("data/subtitles.srt", workDir)
-        Log.d(TAG, "字幕文件: ${subtitleFile.absolutePath}, size=${subtitleFile.length()}")
+        // 复制各片段的素材到工作目录
+        for (i in 1..segmentTexts.size) {
+            val segDir = File(workDir, "seg_$i")
+            segDir.mkdirs()
+            val assetDir = "data/seg_%02d".format(i)
+            copyAsset("$assetDir/image.png", segDir)
+            copyAsset("$assetDir/audio.wav", segDir)
+        }
+
+        // 复制字体到工作目录（libass 需要文件系统路径，无法直接读取 APK 内资源）
+        val fontFile = File(workDir, "font.otf")
+        if (!fontFile.exists()) copyAsset("data/font.otf", workDir)
 
         val finalOutput = File(workDir, "output_${System.currentTimeMillis()}.mp4")
-        WorkFiles(workDir, subtitleFile, finalOutput)
+        WorkFiles(workDir, segmentTexts, fontFile, finalOutput)
     }
 
     private fun copyAsset(assetName: String, destDir: File): File {
@@ -220,46 +245,64 @@ class MainActivity : AppCompatActivity() {
         return destFile
     }
 
-    /**
-     * 用命令字符串执行 FFmpeg（FFmpegKit 自行解析参数）
-     */
+    private fun generateSrtFromSegments(workDir: File, segmentTexts: List<String>): File {
+        val srtFile = File(workDir, "subtitles.srt")
+        val sb = StringBuilder()
+        var offsetMs = 0L
+
+        for (i in 1..segmentTexts.size) {
+            val durationMs = getVideoDurationMs(File(workDir, "segment_$i.mp4"))
+            if (durationMs <= 0) {
+                offsetMs += 3000
+                continue
+            }
+
+            sb.appendLine(i)
+            sb.appendLine("${formatSrtTime(offsetMs)} --> ${formatSrtTime(offsetMs + durationMs)}")
+            sb.appendLine(segmentTexts[i - 1])
+            sb.appendLine()
+
+            offsetMs += durationMs
+        }
+
+        srtFile.writeText(sb.toString())
+        return srtFile
+    }
+
+    private fun getVideoDurationMs(file: File): Long {
+        val info = FFprobeKit.getMediaInformation(file.absolutePath).mediaInformation ?: return -1
+        return (info.duration.toDoubleOrNull()?.times(1000))?.toLong() ?: -1
+    }
+
+    private fun formatSrtTime(ms: Long): String {
+        val h = ms / 3600000
+        val m = (ms % 3600000) / 60000
+        val s = (ms % 60000) / 1000
+        val millis = ms % 1000
+        return "%02d:%02d:%02d,%03d".format(h, m, s, millis)
+    }
+
+    private fun detectHwEncoder(): Boolean {
+        val output = FFmpegKit.execute("-hide_banner -encoders").output ?: return false
+        return output.contains("h264_mediacodec")
+    }
+
     private suspend fun executeFFmpegCommand(cmd: String): Boolean =
         suspendCancellableCoroutine { cont ->
-            Log.d(TAG, "FFmpeg cmd: $cmd")
-            val session = FFmpegKit.executeAsync(
-                cmd,
-                { session ->
-                    val rc = session.returnCode
-                    Log.d(TAG, "FFmpeg done: returnCode=$rc")
-                    if (cont.isActive) cont.resume(ReturnCode.isSuccess(rc))
-                },
-                { log ->
-                    Log.v(TAG, log.message ?: "")
-                    runOnUiThread { appendLog(log.message) }
-                },
+            val session = FFmpegKit.executeAsync(cmd,
+                { s -> if (cont.isActive) cont.resume(ReturnCode.isSuccess(s.returnCode)) },
+                { /* log - 不转发到 UI */ },
                 { /* statistics */ }
             )
             currentSessionId = session.sessionId
             cont.invokeOnCancellation { FFmpegKit.cancel(session.sessionId) }
         }
 
-    /**
-     * 用参数数组执行 FFmpeg（绕过命令字符串解析，避免引号/转义问题）
-     */
     private suspend fun executeFFmpegArgs(args: Array<String>): Boolean =
         suspendCancellableCoroutine { cont ->
-            Log.d(TAG, "FFmpeg args: ${args.joinToString(" ")}")
-            val session = FFmpegKit.executeWithArgumentsAsync(
-                args,
-                { session ->
-                    val rc = session.returnCode
-                    Log.d(TAG, "FFmpeg done: returnCode=$rc")
-                    if (cont.isActive) cont.resume(ReturnCode.isSuccess(rc))
-                },
-                { log ->
-                    Log.v(TAG, log.message ?: "")
-                    runOnUiThread { appendLog(log.message) }
-                },
+            val session = FFmpegKit.executeWithArgumentsAsync(args,
+                { s -> if (cont.isActive) cont.resume(ReturnCode.isSuccess(s.returnCode)) },
+                { /* log - 不转发到 UI */ },
                 { /* statistics */ }
             )
             currentSessionId = session.sessionId
@@ -274,18 +317,22 @@ class MainActivity : AppCompatActivity() {
     ) {
         val startTime = System.currentTimeMillis()
         val workDir = files.workDir
+        val segCount = files.segmentTexts.size
+        val totalSteps = segCount + 2
 
         val segmentTimes = mutableListOf<Long>()
         var concatTime: Long
         var subtitleTime: Long
 
-        appendLog("=== 参数: preset=$preset, crf=$crf, 字幕=${subtitleMode.label} ===")
-        appendLog("")
+        // 检测硬件编码器
+        useHwEncoder = withContext(Dispatchers.IO) { detectHwEncoder() }
+        val encoderName = if (useHwEncoder) "h264_mediacodec (硬编码)" else "libx264 (软编码)"
+        appendLog("编码器: $encoderName | preset=$preset, crf=$crf, 字幕=${subtitleMode.label}")
 
         // ── Step 1: 逐片段生成视频 ──
-        appendLog("=== 第一步: 生成各片段视频 ===")
-        for (i in 1..segmentCount) {
-            updateProgress(i, "生成片段 $i/$segmentCount")
+        appendLog("\n▶ 第一步: 生成各片段视频")
+        for (i in 1..segCount) {
+            updateProgress(i, totalSteps, "生成片段 $i/$segCount")
 
             val segDir = File(workDir, "seg_$i")
             val imagePath = File(segDir, "image.png").absolutePath
@@ -296,8 +343,12 @@ class MainActivity : AppCompatActivity() {
                 append("-loop 1 ")
                 append("-i \"$imagePath\" ")
                 append("-i \"$audioPath\" ")
-                append("-c:v libx264 -tune stillimage ")
-                append("-preset $preset -crf $crf ")
+                if (useHwEncoder) {
+                    append("-c:v h264_mediacodec -b:v 2M ")
+                } else {
+                    append("-c:v libx264 -tune stillimage ")
+                    append("-preset $preset -crf $crf ")
+                }
                 append("-c:a aac -b:a 128k ")
                 append("-pix_fmt yuv420p ")
                 append("-shortest ")
@@ -310,22 +361,25 @@ class MainActivity : AppCompatActivity() {
             segmentTimes.add(segCost)
 
             if (!ok || !segOutputFile.exists() || segOutputFile.length() == 0L) {
-                appendLog("片段 $i 编码失败!")
-                Log.e(TAG, "片段 $i 失败: exists=${segOutputFile.exists()}, size=${segOutputFile.length()}")
+                appendLog("  ✗ 片段 $i 编码失败")
                 runOnUiThread { onSynthesisFinished(false, "片段 $i 编码失败") }
                 return
             }
-            appendLog("片段 $i 完成 (${formatDuration(segCost)}, ${formatSize(segOutputFile.length())})")
+            appendLog("  $i/$segCount  ${formatDuration(segCost)}  ${formatSize(segOutputFile.length())}")
+        }
+
+        // 探测每个片段视频时长，动态生成 SRT 字幕文件
+        val subtitleFile = withContext(Dispatchers.IO) {
+            generateSrtFromSegments(workDir, files.segmentTexts)
         }
 
         // ── Step 2: 拼接 ──
-        updateProgress(segmentCount + 1, "拼接所有片段")
-        appendLog("")
-        appendLog("=== 第二步: 拼接所有片段 ===")
+        updateProgress(segCount + 1, totalSteps, "拼接所有片段")
+        appendLog("\n▶ 第二步: 拼接所有片段")
 
         val concatListFile = File(workDir, "concat_list.txt")
         concatListFile.writeText(buildString {
-            for (i in 1..segmentCount) {
+            for (i in 1..segCount) {
                 appendLine("file '${File(workDir, "segment_$i.mp4").absolutePath}'")
             }
         })
@@ -343,44 +397,47 @@ class MainActivity : AppCompatActivity() {
         concatTime = System.currentTimeMillis() - concatStart
 
         if (!concatOk || !concatenatedFile.exists() || concatenatedFile.length() == 0L) {
-            appendLog("拼接失败!")
-            Log.e(TAG, "拼接失败: exists=${concatenatedFile.exists()}, size=${concatenatedFile.length()}")
+            appendLog("  ✗ 拼接失败")
             runOnUiThread { onSynthesisFinished(false, "拼接失败") }
             return
         }
-        appendLog("拼接完成 (${formatDuration(concatTime)}, ${formatSize(concatenatedFile.length())})")
+        appendLog("  完成 ${formatDuration(concatTime)}  ${formatSize(concatenatedFile.length())}")
 
         // ── Step 3: 字幕处理 ──
-        updateProgress(segmentCount + 2, "字幕处理")
-        appendLog("")
-        appendLog("=== 第三步: 字幕处理 (${subtitleMode.label}) ===")
+        updateProgress(segCount + 2, totalSteps, "字幕处理")
+        appendLog("\n▶ 第三步: 字幕处理 (${subtitleMode.label})")
 
         val finalOutput = files.finalOutput
         val subStart = System.currentTimeMillis()
 
         when (subtitleMode) {
             SubtitleMode.HARD -> {
-                val subPath = files.subtitleFile.absolutePath
-                Log.d(TAG, "硬字幕路径: $subPath, exists=${files.subtitleFile.exists()}, size=${files.subtitleFile.length()}")
+                val fontDir = files.fontFile.parentFile!!.absolutePath
+                val vfValue = "subtitles=${subtitleFile.absolutePath}:" +
+                    "fontsdir=${fontDir}:" +
+                    "force_style='FontName=Source Han Sans CN Medium,FontSize=12,PrimaryColour=&H00FFFFFF," +
+                    "OutlineColour=&H00000000,Outline=2,Shadow=1,MarginV=20'"
 
-                // 用参数数组执行，彻底避免引号/逗号/冒号转义问题
-                // force_style 中单引号包裹，FFmpeg filter parser 不会拆分逗号
-                val vfValue = "subtitles=${subPath}:" +
-                    "force_style='FontSize=24,PrimaryColour=&H00FFFFFF," +
-                    "OutlineColour=&H00000000,Outline=2,Shadow=1,MarginV=30'"
-
-                val args = arrayOf(
-                    "-i", concatenatedFile.absolutePath,
-                    "-vf", vfValue,
-                    "-c:v", "libx264", "-preset", preset, "-crf", crf.toString(),
-                    "-c:a", "copy",
-                    "-y", finalOutput.absolutePath
-                )
-                appendLog("硬字幕 -vf: $vfValue")
+                val args = if (useHwEncoder) {
+                    arrayOf(
+                        "-i", concatenatedFile.absolutePath,
+                        "-vf", vfValue,
+                        "-c:v", "h264_mediacodec", "-b:v", "2M",
+                        "-c:a", "copy",
+                        "-y", finalOutput.absolutePath
+                    )
+                } else {
+                    arrayOf(
+                        "-i", concatenatedFile.absolutePath,
+                        "-vf", vfValue,
+                        "-c:v", "libx264", "-preset", preset, "-crf", crf.toString(),
+                        "-c:a", "copy",
+                        "-y", finalOutput.absolutePath
+                    )
+                }
                 val ok = withContext(Dispatchers.IO) { executeFFmpegArgs(args) }
                 if (!ok || !finalOutput.exists() || finalOutput.length() == 0L) {
-                    appendLog("硬字幕烧录失败!")
-                    Log.e(TAG, "硬字幕失败: exists=${finalOutput.exists()}, size=${finalOutput.length()}")
+                    appendLog("  ✗ 硬字幕烧录失败")
                     runOnUiThread { onSynthesisFinished(false, "硬字幕烧录失败") }
                     return
                 }
@@ -388,16 +445,14 @@ class MainActivity : AppCompatActivity() {
             SubtitleMode.SOFT -> {
                 val args = arrayOf(
                     "-i", concatenatedFile.absolutePath,
-                    "-i", files.subtitleFile.absolutePath,
+                    "-i", subtitleFile.absolutePath,
                     "-map", "0:v", "-map", "0:a", "-map", "1",
                     "-c:v", "copy", "-c:a", "copy", "-c:s", "mov_text",
                     "-y", finalOutput.absolutePath
                 )
-                appendLog("软字幕命令: ffmpeg ${args.joinToString(" ")}")
                 val ok = withContext(Dispatchers.IO) { executeFFmpegArgs(args) }
                 if (!ok || !finalOutput.exists() || finalOutput.length() == 0L) {
-                    appendLog("软字幕封装失败!")
-                    Log.e(TAG, "软字幕失败: exists=${finalOutput.exists()}, size=${finalOutput.length()}")
+                    appendLog("  ✗ 软字幕封装失败")
                     runOnUiThread { onSynthesisFinished(false, "软字幕封装失败") }
                     return
                 }
@@ -409,60 +464,38 @@ class MainActivity : AppCompatActivity() {
             }
         }
         subtitleTime = System.currentTimeMillis() - subStart
-        appendLog("字幕处理完成 (${formatDuration(subtitleTime)}, ${formatSize(finalOutput.length())})")
+        appendLog("  完成 ${formatDuration(subtitleTime)}  ${formatSize(finalOutput.length())}")
 
         // ── 清理中间文件 ──
-        appendLog("")
-        appendLog("=== 清理中间文件 ===")
         withContext(Dispatchers.IO) {
             try {
-                for (i in 1..segmentCount) {
-                    File(workDir, "segment_$i.mp4").delete()
-                }
+                for (i in 1..segCount) File(workDir, "segment_$i.mp4").delete()
                 concatListFile.delete()
                 concatenatedFile.delete()
-            } catch (e: Exception) {
-                Log.w(TAG, "清理中间文件异常", e)
-            }
+                subtitleFile.delete()
+            } catch (_: Exception) {}
         }
-        appendLog("清理完成")
 
         // ── 耗时分析 ──
         val totalDuration = System.currentTimeMillis() - startTime
         val outputSize = finalOutput.length()
         val segTotal = segmentTimes.sum()
-        val segMin = segmentTimes.minOrNull() ?: 0
-        val segMax = segmentTimes.maxOrNull() ?: 0
         val segAvg = if (segmentTimes.isNotEmpty()) segTotal / segmentTimes.size else 0
 
-        appendLog("")
-        appendLog("=========================================")
-        appendLog("           耗时分析总结")
-        appendLog("=========================================")
-        appendLog("片段编码总计: ${formatDuration(segTotal)} (占比 ${pct(segTotal, totalDuration)})")
-        appendLog("  最快片段: ${formatDuration(segMin)}")
-        appendLog("  最慢片段: ${formatDuration(segMax)}")
-        appendLog("  平均每片: ${formatDuration(segAvg)}")
-        appendLog("拼接耗时:   ${formatDuration(concatTime)} (占比 ${pct(concatTime, totalDuration)})")
-        appendLog("字幕耗时:   ${formatDuration(subtitleTime)} (占比 ${pct(subtitleTime, totalDuration)})")
-        appendLog("-----------------------------------------")
-        appendLog("总耗时:     ${formatDuration(totalDuration)}")
-        appendLog("输出文件:   ${formatSize(outputSize)}")
-        appendLog("=========================================")
+        appendLog("\n═══════════ 耗时分析 ═══════════")
+        appendLog("片段编码: ${formatDuration(segTotal)} (${pct(segTotal, totalDuration)}) 均${formatDuration(segAvg)}")
+        appendLog("拼接:     ${formatDuration(concatTime)} (${pct(concatTime, totalDuration)})")
+        appendLog("字幕:     ${formatDuration(subtitleTime)} (${pct(subtitleTime, totalDuration)})")
+        appendLog("总耗时:   ${formatDuration(totalDuration)}")
+        appendLog("输出:     ${formatSize(outputSize)}")
 
-        Log.i(TAG, "===== 合成完成 =====")
-        Log.i(TAG, "总耗时: ${totalDuration}ms")
-        Log.i(TAG, "片段编码: ${segTotal}ms (min=${segMin}, max=${segMax}, avg=${segAvg})")
-        Log.i(TAG, "拼接: ${concatTime}ms, 字幕: ${subtitleTime}ms")
-        Log.i(TAG, "输出: ${finalOutput.absolutePath}, $outputSize bytes")
+        Log.i(TAG, "合成完成: ${totalDuration}ms, 编码${segTotal}ms, 拼接${concatTime}ms, 字幕${subtitleTime}ms, ${outputSize}bytes")
 
         val resultInfo = buildResultInfo(
             totalDuration, preset, crf, subtitleMode, outputSize, files,
             segmentTimes, concatTime, subtitleTime
         )
-        runOnUiThread {
-            onSynthesisFinished(true, resultInfo, finalOutput)
-        }
+        runOnUiThread { onSynthesisFinished(true, resultInfo, finalOutput) }
     }
 
     private fun pct(part: Long, total: Long): String {
@@ -470,11 +503,11 @@ class MainActivity : AppCompatActivity() {
         return "%.1f%%".format(part * 100.0 / total)
     }
 
-    private fun updateProgress(step: Int, desc: String) {
-        val pct = (step * 100) / totalSteps
+    private fun updateProgress(step: Int, total: Int, desc: String) {
+        val pct = (step * 100) / total
         runOnUiThread {
             progressBar.progress = pct
-            tvProgress.text = getString(R.string.fmt_progress, step, totalSteps, pct, desc)
+            tvProgress.text = getString(R.string.fmt_progress, step, total, pct, desc)
         }
     }
 
@@ -507,10 +540,10 @@ class MainActivity : AppCompatActivity() {
             appendLine("Preset: $preset")
             appendLine("CRF: $crf")
             appendLine("字幕模式: ${subtitleMode.label}")
-            appendLine("编码器: libx264 (软编码)")
+            appendLine("编码器: ${if (useHwEncoder) "h264_mediacodec (硬编码)" else "libx264 (软编码)"}")
             appendLine()
             appendLine("--- 文件信息 ---")
-            appendLine("片段数: $segmentCount")
+            appendLine("片段数: ${files.segmentTexts.size}")
             appendLine("输出文件: ${formatSize(outputSize)}")
             appendLine("输出路径: ${files.finalOutput.absolutePath}")
             appendLine()
@@ -555,11 +588,7 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, R.string.toast_file_not_found, Toast.LENGTH_SHORT).show()
             return
         }
-        val uri: Uri = FileProvider.getUriForFile(
-            this,
-            "${packageName}.fileprovider",
-            file
-        )
+        val uri: Uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", file)
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, "video/mp4")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -572,10 +601,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun appendLog(text: String) {
-        Log.d(TAG, text)
-        tvLog.append(text)
-        if (!text.endsWith("\n")) tvLog.append("\n")
-        scrollLog.post { scrollLog.fullScroll(View.FOCUS_DOWN) }
+        runOnUiThread {
+            tvLog.append(text)
+            if (!text.endsWith("\n")) tvLog.append("\n")
+            if (!pendingScroll) {
+                pendingScroll = true
+                scrollLog.post {
+                    scrollLog.fullScroll(View.FOCUS_DOWN)
+                    pendingScroll = false
+                }
+            }
+        }
     }
 
     private fun formatDuration(ms: Long): String {
@@ -583,19 +619,14 @@ class MainActivity : AppCompatActivity() {
         val minutes = seconds / 60
         val secs = seconds % 60
         val millis = ms % 1000
-        return if (minutes > 0) {
-            "${minutes}分${secs}秒${millis}毫秒"
-        } else {
-            "${secs}秒${millis}毫秒"
-        }
+        return if (minutes > 0) "${minutes}分${secs}秒${millis}毫秒"
+        else "${secs}秒${millis}毫秒"
     }
 
-    private fun formatSize(bytes: Long): String {
-        return when {
-            bytes >= 1024 * 1024 -> "%.2fMB".format(bytes / 1024.0 / 1024.0)
-            bytes >= 1024 -> "%.1fKB".format(bytes / 1024.0)
-            else -> "${bytes}B"
-        }
+    private fun formatSize(bytes: Long): String = when {
+        bytes >= 1024 * 1024 -> "%.2fMB".format(bytes / 1024.0 / 1024.0)
+        bytes >= 1024 -> "%.1fKB".format(bytes / 1024.0)
+        else -> "${bytes}B"
     }
 
     enum class SubtitleMode(val label: String) {

@@ -55,4 +55,5 @@ dependencies {
 
     // FFmpegKit
     implementation("com.arthenica:ffmpeg-kit-full-gpl:6.0-2")
+    implementation("androidx.activity:activity:1.12.4")
 }

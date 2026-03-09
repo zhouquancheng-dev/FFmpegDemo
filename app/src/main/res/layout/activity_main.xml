@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/main"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#F5F5F5">
+    android:background="?attr/colorSurface">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -12,143 +14,186 @@
 
         <!-- 标题 -->
         <TextView
+            android:id="@+id/toolbar"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="@string/title_synthesis_test"
-            android:textSize="22sp"
-            android:textStyle="bold"
-            android:textColor="#1976D2"
+            android:layout_marginTop="8dp"
+            android:layout_marginBottom="20dp"
             android:gravity="center"
-            android:layout_marginBottom="16dp" />
+            android:text="@string/title_synthesis_test"
+            android:textColor="?attr/colorOnSurface"
+            android:textSize="20sp"
+            android:textStyle="bold" />
 
         <!-- 设备信息 -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="12dp">
+            android:layout_marginBottom="12dp"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="0dp"
+            app:strokeColor="?attr/colorOutlineVariant"
+            app:strokeWidth="1dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:padding="12dp">
+                android:padding="16dp">
 
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
+                    android:layout_marginBottom="8dp"
                     android:text="@string/label_device_info"
-                    android:textStyle="bold"
-                    android:textSize="16sp"
-                    android:layout_marginBottom="8dp" />
+                    android:textColor="?attr/colorOnSurfaceVariant"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
 
                 <TextView
                     android:id="@+id/tvDeviceInfo"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:textSize="13sp"
                     android:fontFamily="monospace"
-                    android:lineSpacingExtra="4dp" />
+                    android:lineSpacingExtra="3dp"
+                    android:textColor="?attr/colorOnSurface"
+                    android:textSize="12sp" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- 编码参数选择 -->
+        <!-- 编码参数 -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="12dp">
+            android:layout_marginBottom="12dp"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="0dp"
+            app:strokeColor="?attr/colorOutlineVariant"
+            app:strokeWidth="1dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:padding="12dp">
+                android:padding="16dp">
 
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
+                    android:layout_marginBottom="12dp"
                     android:text="@string/label_encoding_params"
-                    android:textStyle="bold"
-                    android:textSize="16sp"
-                    android:layout_marginBottom="8dp" />
+                    android:textColor="?attr/colorOnSurfaceVariant"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
 
                 <!-- Preset -->
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="@string/label_preset"
-                    android:textSize="14sp" />
+                    android:textColor="?attr/colorOnSurfaceVariant"
+                    android:textSize="13sp" />
 
-                <Spinner
-                    android:id="@+id/spinnerPreset"
+                <com.google.android.material.textfield.TextInputLayout
+                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
                     android:layout_width="match_parent"
-                    android:layout_height="48dp"
-                    android:layout_marginBottom="8dp" />
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="8dp"
+                    app:boxCornerRadiusBottomEnd="8dp"
+                    app:boxCornerRadiusBottomStart="8dp"
+                    app:boxCornerRadiusTopEnd="8dp"
+                    app:boxCornerRadiusTopStart="8dp"
+                    app:boxStrokeColor="?attr/colorOutlineVariant"
+                    app:endIconTint="?attr/colorOnSurfaceVariant">
+
+                    <AutoCompleteTextView
+                        android:id="@+id/actvPreset"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:inputType="none"
+                        android:textSize="14sp"
+                        android:popupBackground="@android:color/white" />
+                </com.google.android.material.textfield.TextInputLayout>
 
                 <!-- CRF -->
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="@string/label_crf"
-                    android:textSize="14sp" />
+                    android:textColor="?attr/colorOnSurfaceVariant"
+                    android:textSize="13sp" />
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:orientation="horizontal"
                     android:gravity="center_vertical"
-                    android:layout_marginBottom="8dp">
+                    android:orientation="horizontal">
 
-                    <SeekBar
-                        android:id="@+id/seekBarCrf"
+                    <com.google.android.material.slider.Slider
+                        android:id="@+id/sliderCrf"
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:max="51"
-                        android:progress="18" />
+                        android:stepSize="1"
+                        android:value="18"
+                        android:valueFrom="0"
+                        android:valueTo="51"
+                        app:haloRadius="0dp"
+                        app:thumbColor="?attr/colorPrimary"
+                        app:thumbElevation="0dp"
+                        app:trackColorActive="?attr/colorPrimary"
+                        app:trackColorInactive="?attr/colorSurfaceVariant" />
 
                     <TextView
                         android:id="@+id/tvCrfValue"
-                        android:layout_width="40dp"
+                        android:layout_width="36dp"
                         android:layout_height="wrap_content"
+                        android:gravity="center"
                         android:text="@string/default_crf_value"
+                        android:textColor="?attr/colorPrimary"
                         android:textSize="14sp"
-                        android:gravity="center" />
+                        android:textStyle="bold" />
                 </LinearLayout>
 
                 <!-- 字幕模式 -->
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
                     android:text="@string/label_subtitle_mode"
-                    android:textSize="14sp" />
+                    android:textColor="?attr/colorOnSurfaceVariant"
+                    android:textSize="13sp" />
 
                 <RadioGroup
                     android:id="@+id/rgSubtitleMode"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:layout_marginBottom="8dp">
+                    android:layout_marginTop="4dp"
+                    android:orientation="horizontal">
 
                     <RadioButton
                         android:id="@+id/rbHardSub"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
+                        android:checked="true"
                         android:text="@string/subtitle_hard"
-                        android:checked="true" />
+                        android:textSize="13sp" />
 
                     <RadioButton
                         android:id="@+id/rbSoftSub"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
+                        android:layout_marginStart="12dp"
                         android:text="@string/subtitle_soft"
-                        android:layout_marginStart="16dp" />
+                        android:textSize="13sp" />
 
                     <RadioButton
                         android:id="@+id/rbNoSub"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
+                        android:layout_marginStart="12dp"
                         android:text="@string/subtitle_none"
-                        android:layout_marginStart="16dp" />
+                        android:textSize="13sp" />
                 </RadioGroup>
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
@@ -156,40 +201,49 @@
         <!-- 操作按钮 -->
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btnStart"
+            style="@style/Widget.Material3.Button"
             android:layout_width="match_parent"
-            android:layout_height="56dp"
+            android:layout_height="52dp"
+            android:layout_marginBottom="8dp"
             android:text="@string/btn_start"
-            android:textSize="16sp"
-            android:layout_marginBottom="8dp" />
+            android:textSize="15sp"
+            app:cornerRadius="12dp"
+            app:elevation="0dp" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btnCancel"
+            style="@style/Widget.Material3.Button.OutlinedButton"
             android:layout_width="match_parent"
-            android:layout_height="48dp"
+            android:layout_height="44dp"
+            android:layout_marginBottom="12dp"
             android:text="@string/btn_cancel"
             android:textSize="14sp"
             android:visibility="gone"
-            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-            android:layout_marginBottom="12dp" />
+            app:cornerRadius="12dp"
+            app:elevation="0dp" />
 
         <!-- 进度 -->
-        <ProgressBar
+        <com.google.android.material.progressindicator.LinearProgressIndicator
             android:id="@+id/progressBar"
-            style="?android:attr/progressBarStyleHorizontal"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginBottom="4dp"
             android:max="100"
             android:visibility="gone"
-            android:layout_marginBottom="4dp" />
+            app:indicatorColor="?attr/colorPrimary"
+            app:trackColor="?attr/colorSurfaceVariant"
+            app:trackCornerRadius="4dp"
+            app:trackThickness="6dp" />
 
         <TextView
             android:id="@+id/tvProgress"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:textSize="13sp"
-            android:visibility="gone"
+            android:layout_marginBottom="12dp"
             android:gravity="center"
-            android:layout_marginBottom="12dp" />
+            android:textColor="?attr/colorOnSurfaceVariant"
+            android:textSize="12sp"
+            android:visibility="gone" />
 
         <!-- 结果统计 -->
         <com.google.android.material.card.MaterialCardView
@@ -197,50 +251,59 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginBottom="12dp"
-            android:visibility="gone">
+            android:visibility="gone"
+            app:cardBackgroundColor="#F1F8E9"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="0dp"
+            app:strokeColor="#A5D6A7"
+            app:strokeWidth="1dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:padding="12dp">
+                android:padding="16dp">
 
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
+                    android:layout_marginBottom="8dp"
                     android:text="@string/label_result"
-                    android:textStyle="bold"
-                    android:textSize="16sp"
-                    android:textColor="#4CAF50"
-                    android:layout_marginBottom="8dp" />
+                    android:textColor="#2E7D32"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
 
                 <TextView
                     android:id="@+id/tvResult"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:textSize="14sp"
                     android:fontFamily="monospace"
-                    android:lineSpacingExtra="4dp" />
+                    android:lineSpacingExtra="3dp"
+                    android:textColor="#1B5E20"
+                    android:textSize="12sp" />
 
                 <TextView
                     android:id="@+id/tvOutputPath"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:textSize="13sp"
-                    android:textColor="#1976D2"
-                    android:visibility="gone"
                     android:layout_marginTop="8dp"
                     android:clickable="true"
-                    android:focusable="true" />
+                    android:focusable="true"
+                    android:textColor="?attr/colorPrimary"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnPlayVideo"
+                    style="@style/Widget.Material3.Button.TonalButton"
                     android:layout_width="match_parent"
-                    android:layout_height="44dp"
+                    android:layout_height="40dp"
+                    android:layout_marginTop="12dp"
                     android:text="@string/btn_play_video"
-                    android:textSize="14sp"
+                    android:textSize="13sp"
                     android:visibility="gone"
-                    android:layout_marginTop="8dp" />
+                    app:cornerRadius="10dp"
+                    app:elevation="0dp" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
@@ -248,37 +311,47 @@
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="16dp">
+            android:layout_marginBottom="16dp"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="0dp"
+            app:strokeColor="?attr/colorOutlineVariant"
+            app:strokeWidth="1dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:padding="12dp">
+                android:padding="16dp">
 
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
+                    android:layout_marginBottom="8dp"
                     android:text="@string/label_ffmpeg_log"
-                    android:textStyle="bold"
-                    android:textSize="16sp"
-                    android:layout_marginBottom="8dp" />
+                    android:textColor="?attr/colorOnSurfaceVariant"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
 
                 <ScrollView
                     android:id="@+id/scrollLog"
                     android:layout_width="match_parent"
-                    android:layout_height="300dp">
+                    android:layout_height="280dp"
+                    android:background="?attr/colorSurfaceVariant"
+                    android:fadingEdge="vertical"
+                    android:padding="12dp"
+                    android:requiresFadingEdge="vertical">
 
                     <TextView
                         android:id="@+id/tvLog"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:textSize="11sp"
                         android:fontFamily="monospace"
-                        android:textColor="#333333"
-                        android:text="@string/log_waiting" />
+                        android:text="@string/log_waiting"
+                        android:textColor="?attr/colorOnSurface"
+                        android:textSize="11sp" />
                 </ScrollView>
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
+
     </LinearLayout>
-</ScrollView>
+</androidx.core.widget.NestedScrollView>
