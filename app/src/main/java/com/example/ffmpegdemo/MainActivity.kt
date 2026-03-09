@@ -334,43 +334,49 @@ class MainActivity : AppCompatActivity() {
      * 按标点将文本拆成多条短句，每条不超过 maxChars
      * 优先在句末标点处断句，其次在逗号等停顿处断
      */
+    /**
+     * 按标点拆句：先拆散再贪心合并，每条不超过 maxChars 且无碎片
+     */
     private fun splitBySentence(text: String, maxChars: Int): List<String> {
         if (text.length <= maxChars) return listOf(text)
 
-        val breakPunctuation = setOf('，', '。', '、', '；', '！', '？', ',', '.', '!', '?')
-        val sentences = mutableListOf<String>()
+        // 第一步：按标点拆成最小粒度的短句
+        val punctuation = setOf('，', '。', '、', '；', '！', '？', ',', '.', '!', '?')
+        val fragments = mutableListOf<String>()
         var start = 0
-
-        while (start < text.length) {
-            val remaining = text.length - start
-            if (remaining <= maxChars) {
-                sentences.add(text.substring(start).trim())
-                break
+        for (i in text.indices) {
+            if (text[i] in punctuation) {
+                fragments.add(text.substring(start, i + 1).trim())
+                start = i + 1
             }
-            // 从 maxChars 往前找最近的标点断句
-            var breakAt = -1
-            for (j in (start + maxChars - 1) downTo start) {
-                if (text[j] in breakPunctuation) {
-                    breakAt = j + 1
-                    break
-                }
-            }
-            // 没找到标点，从 maxChars 往后找
-            if (breakAt == -1) {
-                for (j in start + maxChars until text.length) {
-                    if (text[j] in breakPunctuation) {
-                        breakAt = j + 1
-                        break
-                    }
-                }
-            }
-            // 仍然没找到，强制在 maxChars 处断
-            if (breakAt == -1) breakAt = start + maxChars
-
-            sentences.add(text.substring(start, breakAt).trim())
-            start = breakAt
         }
-        return sentences.filter { it.isNotEmpty() }
+        if (start < text.length) fragments.add(text.substring(start).trim())
+        fragments.removeAll { it.isEmpty() }
+
+        // 只有一个片段或没拆开，直接返回
+        if (fragments.size <= 1) return listOf(text)
+
+        // 第二步：贪心合并——逐个累加，超过 maxChars 就换新行
+        val result = mutableListOf<String>()
+        val current = StringBuilder(fragments[0])
+        for (i in 1 until fragments.size) {
+            if (current.length + fragments[i].length <= maxChars) {
+                current.append(fragments[i])
+            } else {
+                result.add(current.toString())
+                current.clear().append(fragments[i])
+            }
+        }
+        if (current.isNotEmpty()) result.add(current.toString())
+
+        // 第三步：尾巴太短就并入上一条
+        val minChars = maxChars / 3
+        if (result.size >= 2 && result.last().length < minChars) {
+            val tail = result.removeAt(result.lastIndex)
+            result[result.lastIndex] = result.last() + tail
+        }
+
+        return result
     }
 
     /**
