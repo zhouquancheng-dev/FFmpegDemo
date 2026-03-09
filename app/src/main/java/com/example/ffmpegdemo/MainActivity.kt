@@ -90,6 +90,8 @@ class MainActivity : AppCompatActivity() {
         "fast", "medium", "slow", "slower", "veryslow"
     )
 
+    private data class MotionTemplate(val name: String, val filter: String)
+
     data class WorkFiles(
         val workDir: File,
         val segmentTexts: List<String>,
@@ -324,7 +326,7 @@ class MainActivity : AppCompatActivity() {
         val maxChars = calcMaxCharsPerLine(File(workDir, "segment_1.mp4"))
 
         for (i in 1..segmentTexts.size) {
-            val durationMs = getVideoDurationMs(File(workDir, "segment_$i.mp4"))
+            val durationMs = (getMediaDurationSec(File(workDir, "segment_$i.mp4"))?.times(1000))?.toLong() ?: -1
             if (durationMs <= 0) {
                 offsetMs += FALLBACK_DURATION_MS
                 continue
@@ -348,10 +350,6 @@ class MainActivity : AppCompatActivity() {
         return srtFile
     }
 
-    /**
-     * 按标点将文本拆成多条短句，每条不超过 maxChars
-     * 优先在句末标点处断句，其次在逗号等停顿处断
-     */
     /**
      * 按标点拆句：先拆散再贪心合并，每条不超过 maxChars 且无碎片
      */
@@ -417,14 +415,10 @@ class MainActivity : AppCompatActivity() {
         return 20
     }
 
-    private fun getVideoDurationMs(file: File): Long {
-        val info = FFprobeKit.getMediaInformation(file.absolutePath).mediaInformation ?: return -1
-        return (info.duration.toDoubleOrNull()?.times(1000))?.toLong() ?: -1
-    }
-
-    private fun getAudioDurationSec(file: File): Double {
-        val info = FFprobeKit.getMediaInformation(file.absolutePath).mediaInformation ?: return 3.0
-        return info.duration.toDoubleOrNull() ?: 3.0
+    /** 返回媒体时长（秒），探测失败返回 null */
+    private fun getMediaDurationSec(file: File): Double? {
+        val info = FFprobeKit.getMediaInformation(file.absolutePath).mediaInformation ?: return null
+        return info.duration.toDoubleOrNull()
     }
 
     private fun getImageSize(file: File): Pair<Int, Int> {
@@ -458,23 +452,21 @@ class MainActivity : AppCompatActivity() {
         // 缓动: ease-in-out  t=on/total → (sin(t*PI - PI/2)+1)/2
         val ease = "((sin(on/$totalFrames*PI-PI/2)+1)/2)"
 
-        data class Template(val name: String, val filter: String)
-
         // x/y 用 max(0,...) 防止 zoom>1 时坐标为负导致绿边
         val cx = "max(0\\,($width-iw*zoom)/2)"
         val cy = "max(0\\,($height-ih*zoom)/2)"
         val templates = listOf(
-            Template("中心放大",
+            MotionTemplate("中心放大",
                 "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=$cx:y=$cy:s=$s"),
-            Template("中心缩小",
+            MotionTemplate("中心缩小",
                 "zoompan=z=1+${zoomRange}-${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=$cx:y=$cy:s=$s"),
-            Template("左移右",
+            MotionTemplate("左移右",
                 "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=max(0\\,($width-iw*zoom)*($ease)):y=$cy:s=$s"),
-            Template("右移左",
+            MotionTemplate("右移左",
                 "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=max(0\\,($width-iw*zoom)*(1-$ease)):y=$cy:s=$s"),
-            Template("上移下",
+            MotionTemplate("上移下",
                 "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=$cx:y=max(0\\,($height-ih*zoom)*($ease)):s=$s"),
-            Template("下移上",
+            MotionTemplate("下移上",
                 "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=$cx:y=max(0\\,($height-ih*zoom)*(1-$ease)):s=$s")
         )
 
@@ -559,7 +551,7 @@ class MainActivity : AppCompatActivity() {
             if (motionMode != MotionMode.NONE) {
                 val imageFile = File(segDir, "image.png")
                 val audioDurationSec = withContext(Dispatchers.IO) {
-                    getAudioDurationSec(File(segDir, "audio.wav"))
+                    getMediaDurationSec(File(segDir, "audio.wav")) ?: 3.0
                 }
                 val imgSize = withContext(Dispatchers.IO) { getImageSize(imageFile) }
                 val result = getRandomMotionEffect(
@@ -572,29 +564,16 @@ class MainActivity : AppCompatActivity() {
             }
 
             val cmd = buildString {
-                if (motionFilter == null) {
-                    // 无动效：保持原逻辑
-                    append("-loop 1 ")
-                    append("-i \"$imagePath\" ")
-                    append("-i \"$audioPath\" ")
-                    if (useHwEncoder) {
-                        append("-c:v h264_mediacodec -b:v $HW_ENCODER_BITRATE")
-                    } else {
-                        append("-c:v libx264 -tune stillimage ")
-                        append("-preset $preset -crf $crf ")
-                    }
+                append("-loop 1 ")
+                append("-i \"$imagePath\" ")
+                append("-i \"$audioPath\" ")
+                if (motionFilter != null) append("-vf \"$motionFilter\" ")
+                if (useHwEncoder) {
+                    append("-c:v h264_mediacodec -b:v $HW_ENCODER_BITRATE ")
                 } else {
-                    // 有动效：-loop 1 + d=1 逐帧处理
-                    append("-loop 1 ")
-                    append("-i \"$imagePath\" ")
-                    append("-i \"$audioPath\" ")
-                    append("-vf \"$motionFilter\" ")
-                    if (useHwEncoder) {
-                        append("-c:v h264_mediacodec -b:v $HW_ENCODER_BITRATE")
-                    } else {
-                        append("-c:v libx264 ")
-                        append("-preset $preset -crf $crf ")
-                    }
+                    append("-c:v libx264 ")
+                    if (motionFilter == null) append("-tune stillimage ")
+                    append("-preset $preset -crf $crf ")
                 }
                 append("-c:a aac -b:a $AUDIO_BITRATE ")
                 append("-pix_fmt yuv420p ")
@@ -669,27 +648,20 @@ class MainActivity : AppCompatActivity() {
                     "force_style='FontName=Source Han Sans CN Medium,FontSize=$SUBTITLE_FONT_SIZE,PrimaryColour=&H00FFFFFF," +
                     "OutlineColour=&H00000000,Outline=$SUBTITLE_OUTLINE,Shadow=$SUBTITLE_SHADOW,MarginV=$SUBTITLE_MARGIN_V'"
 
-                val args = if (useHwEncoder) {
-                    arrayOf(
-                        "-i", concatenatedFile.absolutePath,
-                        "-stream_loop", "-1", "-i", bgmFile.absolutePath,
-                        "-filter_complex", "[0:v]${vfValue}[vout];$audioFilter",
-                        "-map", "[vout]", "-map", "[aout]",
-                        "-c:v", "h264_mediacodec", "-b:v", HW_ENCODER_BITRATE,
-                        "-c:a", "aac", "-b:a", AUDIO_BITRATE,
-                        "-y", finalOutput.absolutePath
-                    )
+                val encoderArgs = if (useHwEncoder) {
+                    arrayOf("-c:v", "h264_mediacodec", "-b:v", HW_ENCODER_BITRATE)
                 } else {
-                    arrayOf(
-                        "-i", concatenatedFile.absolutePath,
-                        "-stream_loop", "-1", "-i", bgmFile.absolutePath,
-                        "-filter_complex", "[0:v]${vfValue}[vout];$audioFilter",
-                        "-map", "[vout]", "-map", "[aout]",
-                        "-c:v", "libx264", "-preset", preset, "-crf", crf.toString(),
-                        "-c:a", "aac", "-b:a", AUDIO_BITRATE,
-                        "-y", finalOutput.absolutePath
-                    )
+                    arrayOf("-c:v", "libx264", "-preset", preset, "-crf", crf.toString())
                 }
+                val args = arrayOf(
+                    "-i", concatenatedFile.absolutePath,
+                    "-stream_loop", "-1", "-i", bgmFile.absolutePath,
+                    "-filter_complex", "[0:v]${vfValue}[vout];$audioFilter",
+                    "-map", "[vout]", "-map", "[aout]",
+                    *encoderArgs,
+                    "-c:a", "aac", "-b:a", AUDIO_BITRATE,
+                    "-y", finalOutput.absolutePath
+                )
                 val ok = withContext(Dispatchers.IO) { executeFFmpegArgs(args) }
                 if (!ok || !finalOutput.exists() || finalOutput.length() == 0L) {
                     appendLog("  ✗ 硬字幕烧录 + BGM 混音失败")
@@ -778,7 +750,7 @@ class MainActivity : AppCompatActivity() {
     private fun updateProgress(step: Int, total: Int, desc: String) {
         val pct = (step * 100) / total
         runOnUiThread {
-            progressBar.progress = pct
+            progressBar.setProgress(pct, true)
             tvProgress.text = getString(R.string.fmt_progress, step, total, pct, desc)
         }
     }
