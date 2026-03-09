@@ -47,9 +47,14 @@ class MainActivity : AppCompatActivity() {
         private const val SUBTITLE_USABLE_WIDTH = 0.85   // 字幕可用宽度占比（用于计算每行最大字数）
 
         // ── 音频 ──
+        private const val BGM_FILENAME = "a_litte_story.mp3" // BGM 文件名（assets/data/ 下）
         private const val BGM_VOLUME = 0.3               // 背景音乐音量（0.0~1.0）
-        private const val BGM_FADEOUT_SEC = 2             // BGM 结尾淡出秒数
+        private const val BGM_FADEOUT_SEC = 2             // amix dropout_transition 过渡秒数
         private const val AUDIO_BITRATE = "128k"         // 音频编码码率
+
+        // ── 视频编码 ──
+        private const val HW_ENCODER_BITRATE = "2M"      // 硬件编码器码率
+        private const val FALLBACK_DURATION_MS = 3000L    // 片段时长探测失败时的 fallback
 
         // ── 动效 ──
         private const val TARGET_FPS = 25                // zoompan 帧率
@@ -251,7 +256,7 @@ class MainActivity : AppCompatActivity() {
             FFmpegKit.cancel(currentSessionId)
             appendLog("=== 用户取消 ===")
         }
-        onSynthesisFinished(false, getString(R.string.status_cancelled))
+        runOnUiThread { onSynthesisFinished(false, getString(R.string.status_cancelled)) }
     }
 
     private suspend fun prepareAssets(): WorkFiles = withContext(Dispatchers.IO) {
@@ -290,8 +295,8 @@ class MainActivity : AppCompatActivity() {
         if (!fontFile.exists()) copyAsset("data/font.otf", workDir)
 
         // 复制背景音乐到工作目录
-        val bgmFile = File(workDir, "a_litte_story.mp3")
-        if (!bgmFile.exists()) copyAsset("data/a_litte_story.mp3", workDir)
+        val bgmFile = File(workDir, BGM_FILENAME)
+        if (!bgmFile.exists()) copyAsset("data/$BGM_FILENAME", workDir)
 
         val finalOutput = File(workDir, "output.mp4")
         WorkFiles(workDir, segmentTexts, fontFile, bgmFile, finalOutput)
@@ -321,7 +326,7 @@ class MainActivity : AppCompatActivity() {
         for (i in 1..segmentTexts.size) {
             val durationMs = getVideoDurationMs(File(workDir, "segment_$i.mp4"))
             if (durationMs <= 0) {
-                offsetMs += 3000
+                offsetMs += FALLBACK_DURATION_MS
                 continue
             }
 
@@ -455,20 +460,22 @@ class MainActivity : AppCompatActivity() {
 
         data class Template(val name: String, val filter: String)
 
-        // (width - iw*zoom)/2
+        // x/y 用 max(0,...) 防止 zoom>1 时坐标为负导致绿边
+        val cx = "max(0\\,($width-iw*zoom)/2)"
+        val cy = "max(0\\,($height-ih*zoom)/2)"
         val templates = listOf(
             Template("中心放大",
-                "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=($width-iw*zoom)/2:y=($height-ih*zoom)/2:s=$s"),
+                "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=$cx:y=$cy:s=$s"),
             Template("中心缩小",
-                "zoompan=z=1+${zoomRange}-${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=($width-iw*zoom)/2:y=($height-ih*zoom)/2:s=$s"),
+                "zoompan=z=1+${zoomRange}-${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=$cx:y=$cy:s=$s"),
             Template("左移右",
-                "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=($width-iw*zoom)*($ease):y=($height-ih*zoom)/2:s=$s"),
+                "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=max(0\\,($width-iw*zoom)*($ease)):y=$cy:s=$s"),
             Template("右移左",
-                "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=($width-iw*zoom)*(1-$ease):y=($height-ih*zoom)/2:s=$s"),
+                "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=max(0\\,($width-iw*zoom)*(1-$ease)):y=$cy:s=$s"),
             Template("上移下",
-                "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=($width-iw*zoom)/2:y=($height-ih*zoom)*($ease):s=$s"),
+                "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=$cx:y=max(0\\,($height-ih*zoom)*($ease)):s=$s"),
             Template("下移上",
-                "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=($width-iw*zoom)/2:y=($height-ih*zoom)*(1-$ease):s=$s")
+                "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=$cx:y=max(0\\,($height-ih*zoom)*(1-$ease)):s=$s")
         )
 
         // 相邻不重复的随机选取
@@ -531,7 +538,7 @@ class MainActivity : AppCompatActivity() {
 
         val encoderName = if (useHwEncoder) "h264_mediacodec (硬编码)" else "libx264 (软编码)"
         if (useHwEncoder) {
-            appendLog("编码器: $encoderName | 码率=2M, 字幕=${subtitleMode.label}, 动效=${motionMode.label}")
+            appendLog("编码器: $encoderName | 码率=$HW_ENCODER_BITRATE, 字幕=${subtitleMode.label}, 动效=${motionMode.label}")
         } else {
             appendLog("编码器: $encoderName | preset=$preset, crf=$crf, 字幕=${subtitleMode.label}, 动效=${motionMode.label}")
         }
@@ -571,7 +578,7 @@ class MainActivity : AppCompatActivity() {
                     append("-i \"$imagePath\" ")
                     append("-i \"$audioPath\" ")
                     if (useHwEncoder) {
-                        append("-c:v h264_mediacodec -b:v 2M ")
+                        append("-c:v h264_mediacodec -b:v $HW_ENCODER_BITRATE")
                     } else {
                         append("-c:v libx264 -tune stillimage ")
                         append("-preset $preset -crf $crf ")
@@ -583,7 +590,7 @@ class MainActivity : AppCompatActivity() {
                     append("-i \"$audioPath\" ")
                     append("-vf \"$motionFilter\" ")
                     if (useHwEncoder) {
-                        append("-c:v h264_mediacodec -b:v 2M ")
+                        append("-c:v h264_mediacodec -b:v $HW_ENCODER_BITRATE")
                     } else {
                         append("-c:v libx264 ")
                         append("-preset $preset -crf $crf ")
@@ -656,9 +663,9 @@ class MainActivity : AppCompatActivity() {
 
         when (subtitleMode) {
             SubtitleMode.HARD -> {
-                val fontDir = files.fontFile.parentFile!!.absolutePath
-                val vfValue = "subtitles=${subtitleFile.absolutePath}:" +
-                    "fontsdir=${fontDir}:" +
+                val escapePath = { p: String -> p.replace("\\", "\\\\").replace(":", "\\:") }
+                val vfValue = "subtitles=${escapePath(subtitleFile.absolutePath)}:" +
+                    "fontsdir=${escapePath(files.fontFile.parentFile!!.absolutePath)}:" +
                     "force_style='FontName=Source Han Sans CN Medium,FontSize=$SUBTITLE_FONT_SIZE,PrimaryColour=&H00FFFFFF," +
                     "OutlineColour=&H00000000,Outline=$SUBTITLE_OUTLINE,Shadow=$SUBTITLE_SHADOW,MarginV=$SUBTITLE_MARGIN_V'"
 
@@ -668,7 +675,7 @@ class MainActivity : AppCompatActivity() {
                         "-stream_loop", "-1", "-i", bgmFile.absolutePath,
                         "-filter_complex", "[0:v]${vfValue}[vout];$audioFilter",
                         "-map", "[vout]", "-map", "[aout]",
-                        "-c:v", "h264_mediacodec", "-b:v", "2M",
+                        "-c:v", "h264_mediacodec", "-b:v", HW_ENCODER_BITRATE,
                         "-c:a", "aac", "-b:a", AUDIO_BITRATE,
                         "-y", finalOutput.absolutePath
                     )
@@ -805,7 +812,7 @@ class MainActivity : AppCompatActivity() {
             appendLine("--- 编码参数 ---")
             appendLine("编码器: ${if (useHwEncoder) "h264_mediacodec (硬编码)" else "libx264 (软编码)"}")
             if (useHwEncoder) {
-                appendLine("码率: 2M")
+                appendLine("码率: $HW_ENCODER_BITRATE")
             } else {
                 appendLine("Preset: $preset")
                 appendLine("CRF: $crf")
