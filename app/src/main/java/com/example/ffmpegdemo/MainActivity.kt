@@ -51,7 +51,7 @@ class MainActivity : AppCompatActivity() {
     private var outputFile: File? = null
 
     private val segmentCount = 18
-    private val totalSteps get() = segmentCount + 2 // 18 segments + concat + subtitle
+    private val totalSteps get() = segmentCount + 2
 
     private val presets = arrayOf(
         "ultrafast", "superfast", "veryfast", "faster",
@@ -111,7 +111,7 @@ class MainActivity : AppCompatActivity() {
         val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, presets)
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         spinnerPreset.adapter = adapter
-        spinnerPreset.setSelection(5) // default: medium
+        spinnerPreset.setSelection(5)
     }
 
     private fun setupCrfSeekBar() {
@@ -168,7 +168,7 @@ class MainActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 appendLog("错误: ${e.message}")
                 Log.e(TAG, "合成异常", e)
-                onSynthesisFinished(false, "")
+                runOnUiThread { onSynthesisFinished(false, "") }
             }
         }
     }
@@ -185,6 +185,15 @@ class MainActivity : AppCompatActivity() {
         val workDir = File(filesDir, "ffmpeg_work")
         workDir.mkdirs()
 
+        // 清理上次的输出视频和中间文件
+        workDir.listFiles()?.forEach { f ->
+            if (f.isFile && (f.name.startsWith("output_") || f.name.startsWith("segment_")
+                        || f.name == "concatenated.mp4" || f.name == "concat_list.txt")) {
+                f.delete()
+                Log.d(TAG, "清理旧文件: ${f.name}")
+            }
+        }
+
         for (i in 1..segmentCount) {
             val segDir = File(workDir, "seg_$i")
             segDir.mkdirs()
@@ -193,7 +202,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val subtitleFile = copyAsset("data/subtitles.srt", workDir)
-        Log.d(TAG, "字幕文件已复制: ${subtitleFile.absolutePath}, 大小=${subtitleFile.length()}")
+        Log.d(TAG, "字幕文件: ${subtitleFile.absolutePath}, size=${subtitleFile.length()}")
 
         val finalOutput = File(workDir, "output_${System.currentTimeMillis()}.mp4")
         WorkFiles(workDir, subtitleFile, finalOutput)
@@ -211,17 +220,18 @@ class MainActivity : AppCompatActivity() {
         return destFile
     }
 
+    /**
+     * 用命令字符串执行 FFmpeg（FFmpegKit 自行解析参数）
+     */
     private suspend fun executeFFmpegCommand(cmd: String): Boolean =
         suspendCancellableCoroutine { cont ->
-            Log.d(TAG, "执行FFmpeg: $cmd")
+            Log.d(TAG, "FFmpeg cmd: $cmd")
             val session = FFmpegKit.executeAsync(
                 cmd,
                 { session ->
                     val rc = session.returnCode
-                    Log.d(TAG, "FFmpeg完成: returnCode=$rc")
-                    if (cont.isActive) {
-                        cont.resume(ReturnCode.isSuccess(rc))
-                    }
+                    Log.d(TAG, "FFmpeg done: returnCode=$rc")
+                    if (cont.isActive) cont.resume(ReturnCode.isSuccess(rc))
                 },
                 { log ->
                     Log.v(TAG, log.message ?: "")
@@ -230,9 +240,30 @@ class MainActivity : AppCompatActivity() {
                 { /* statistics */ }
             )
             currentSessionId = session.sessionId
-            cont.invokeOnCancellation {
-                FFmpegKit.cancel(session.sessionId)
-            }
+            cont.invokeOnCancellation { FFmpegKit.cancel(session.sessionId) }
+        }
+
+    /**
+     * 用参数数组执行 FFmpeg（绕过命令字符串解析，避免引号/转义问题）
+     */
+    private suspend fun executeFFmpegArgs(args: Array<String>): Boolean =
+        suspendCancellableCoroutine { cont ->
+            Log.d(TAG, "FFmpeg args: ${args.joinToString(" ")}")
+            val session = FFmpegKit.executeWithArgumentsAsync(
+                args,
+                { session ->
+                    val rc = session.returnCode
+                    Log.d(TAG, "FFmpeg done: returnCode=$rc")
+                    if (cont.isActive) cont.resume(ReturnCode.isSuccess(rc))
+                },
+                { log ->
+                    Log.v(TAG, log.message ?: "")
+                    runOnUiThread { appendLog(log.message) }
+                },
+                { /* statistics */ }
+            )
+            currentSessionId = session.sessionId
+            cont.invokeOnCancellation { FFmpegKit.cancel(session.sessionId) }
         }
 
     private suspend fun runFFmpeg(
@@ -244,7 +275,6 @@ class MainActivity : AppCompatActivity() {
         val startTime = System.currentTimeMillis()
         val workDir = files.workDir
 
-        // 收集每一步耗时
         val segmentTimes = mutableListOf<Long>()
         var concatTime: Long
         var subtitleTime: Long
@@ -252,7 +282,7 @@ class MainActivity : AppCompatActivity() {
         appendLog("=== 参数: preset=$preset, crf=$crf, 字幕=${subtitleMode.label} ===")
         appendLog("")
 
-        // ── Step 1: 逐片段生成视频（静态图片 + 音频） ──
+        // ── Step 1: 逐片段生成视频 ──
         appendLog("=== 第一步: 生成各片段视频 ===")
         for (i in 1..segmentCount) {
             updateProgress(i, "生成片段 $i/$segmentCount")
@@ -260,7 +290,7 @@ class MainActivity : AppCompatActivity() {
             val segDir = File(workDir, "seg_$i")
             val imagePath = File(segDir, "image.png").absolutePath
             val audioPath = File(segDir, "audio.wav").absolutePath
-            val segOutput = File(workDir, "segment_$i.mp4").absolutePath
+            val segOutputFile = File(workDir, "segment_$i.mp4")
 
             val cmd = buildString {
                 append("-loop 1 ")
@@ -271,29 +301,25 @@ class MainActivity : AppCompatActivity() {
                 append("-c:a aac -b:a 128k ")
                 append("-pix_fmt yuv420p ")
                 append("-shortest ")
-                append("-y \"$segOutput\"")
+                append("-y \"${segOutputFile.absolutePath}\"")
             }
 
-            appendLog("片段 $i 命令: $cmd")
             val segStart = System.currentTimeMillis()
             val ok = withContext(Dispatchers.IO) { executeFFmpegCommand(cmd) }
             val segCost = System.currentTimeMillis() - segStart
             segmentTimes.add(segCost)
 
-            if (!ok) {
+            if (!ok || !segOutputFile.exists() || segOutputFile.length() == 0L) {
                 appendLog("片段 $i 编码失败!")
-                Log.e(TAG, "片段 $i 编码失败")
+                Log.e(TAG, "片段 $i 失败: exists=${segOutputFile.exists()}, size=${segOutputFile.length()}")
                 runOnUiThread { onSynthesisFinished(false, "片段 $i 编码失败") }
                 return
             }
-            val segFile = File(segOutput)
-            appendLog("片段 $i 完成 (${formatDuration(segCost)}, ${formatSize(segFile.length())})")
-            Log.d(TAG, "片段 $i 完成: ${segCost}ms, ${segFile.length()} bytes")
+            appendLog("片段 $i 完成 (${formatDuration(segCost)}, ${formatSize(segOutputFile.length())})")
         }
 
-        // ── Step 2: 拼接所有片段 ──
-        val concatStep = segmentCount + 1
-        updateProgress(concatStep, "拼接所有片段")
+        // ── Step 2: 拼接 ──
+        updateProgress(segmentCount + 1, "拼接所有片段")
         appendLog("")
         appendLog("=== 第二步: 拼接所有片段 ===")
 
@@ -312,23 +338,20 @@ class MainActivity : AppCompatActivity() {
             append("-y \"${concatenatedFile.absolutePath}\"")
         }
 
-        appendLog("拼接命令: $concatCmd")
         val concatStart = System.currentTimeMillis()
         val concatOk = withContext(Dispatchers.IO) { executeFFmpegCommand(concatCmd) }
         concatTime = System.currentTimeMillis() - concatStart
 
-        if (!concatOk) {
+        if (!concatOk || !concatenatedFile.exists() || concatenatedFile.length() == 0L) {
             appendLog("拼接失败!")
-            Log.e(TAG, "拼接失败")
+            Log.e(TAG, "拼接失败: exists=${concatenatedFile.exists()}, size=${concatenatedFile.length()}")
             runOnUiThread { onSynthesisFinished(false, "拼接失败") }
             return
         }
         appendLog("拼接完成 (${formatDuration(concatTime)}, ${formatSize(concatenatedFile.length())})")
-        Log.d(TAG, "拼接完成: ${concatTime}ms, ${concatenatedFile.length()} bytes")
 
         // ── Step 3: 字幕处理 ──
-        val subtitleStep = segmentCount + 2
-        updateProgress(subtitleStep, "字幕处理")
+        updateProgress(segmentCount + 2, "字幕处理")
         appendLog("")
         appendLog("=== 第三步: 字幕处理 (${subtitleMode.label}) ===")
 
@@ -337,72 +360,74 @@ class MainActivity : AppCompatActivity() {
 
         when (subtitleMode) {
             SubtitleMode.HARD -> {
-                // subtitles 滤镜: 用单引号包裹整个 -vf，路径用转义处理
                 val subPath = files.subtitleFile.absolutePath
-                Log.d(TAG, "硬字幕文件路径: $subPath")
-                Log.d(TAG, "硬字幕文件存在: ${files.subtitleFile.exists()}, 大小: ${files.subtitleFile.length()}")
+                Log.d(TAG, "硬字幕路径: $subPath, exists=${files.subtitleFile.exists()}, size=${files.subtitleFile.length()}")
 
-                // FFmpegKit subtitles 滤镜中路径需要转义冒号和反斜杠
-                val escapedSubPath = subPath
-                    .replace("\\", "/")       // 统一用正斜杠
-                    .replace(":", "\\:")       // 转义冒号（Android 路径通常无冒号，保险起见）
+                // 用参数数组执行，彻底避免引号/逗号/冒号转义问题
+                // force_style 中单引号包裹，FFmpeg filter parser 不会拆分逗号
+                val vfValue = "subtitles=${subPath}:" +
+                    "force_style='FontSize=24,PrimaryColour=&H00FFFFFF," +
+                    "OutlineColour=&H00000000,Outline=2,Shadow=1,MarginV=30'"
 
-                // force_style 中逗号会被 FFmpeg 当作滤镜分隔符，需要用 \, 转义
-                val forceStyle = "FontSize=24\\,PrimaryColour=&H00FFFFFF\\," +
-                    "OutlineColour=&H00000000\\,Outline=2\\,Shadow=1\\,MarginV=30"
-
-                val cmd = buildString {
-                    append("-i \"${concatenatedFile.absolutePath}\" ")
-                    append("-vf \"subtitles=$escapedSubPath:force_style=$forceStyle\" ")
-                    append("-c:v libx264 -preset $preset -crf $crf ")
-                    append("-c:a copy ")
-                    append("-y \"${finalOutput.absolutePath}\"")
-                }
-                appendLog("硬字幕命令: $cmd")
-                val ok = withContext(Dispatchers.IO) { executeFFmpegCommand(cmd) }
-                if (!ok) {
+                val args = arrayOf(
+                    "-i", concatenatedFile.absolutePath,
+                    "-vf", vfValue,
+                    "-c:v", "libx264", "-preset", preset, "-crf", crf.toString(),
+                    "-c:a", "copy",
+                    "-y", finalOutput.absolutePath
+                )
+                appendLog("硬字幕 -vf: $vfValue")
+                val ok = withContext(Dispatchers.IO) { executeFFmpegArgs(args) }
+                if (!ok || !finalOutput.exists() || finalOutput.length() == 0L) {
                     appendLog("硬字幕烧录失败!")
-                    Log.e(TAG, "硬字幕烧录失败")
+                    Log.e(TAG, "硬字幕失败: exists=${finalOutput.exists()}, size=${finalOutput.length()}")
                     runOnUiThread { onSynthesisFinished(false, "硬字幕烧录失败") }
                     return
                 }
             }
             SubtitleMode.SOFT -> {
-                val cmd = buildString {
-                    append("-i \"${concatenatedFile.absolutePath}\" ")
-                    append("-i \"${files.subtitleFile.absolutePath}\" ")
-                    append("-map 0:v -map 0:a -map 1 ")
-                    append("-c:v copy -c:a copy -c:s mov_text ")
-                    append("-y \"${finalOutput.absolutePath}\"")
-                }
-                appendLog("软字幕命令: $cmd")
-                val ok = withContext(Dispatchers.IO) { executeFFmpegCommand(cmd) }
-                if (!ok) {
+                val args = arrayOf(
+                    "-i", concatenatedFile.absolutePath,
+                    "-i", files.subtitleFile.absolutePath,
+                    "-map", "0:v", "-map", "0:a", "-map", "1",
+                    "-c:v", "copy", "-c:a", "copy", "-c:s", "mov_text",
+                    "-y", finalOutput.absolutePath
+                )
+                appendLog("软字幕命令: ffmpeg ${args.joinToString(" ")}")
+                val ok = withContext(Dispatchers.IO) { executeFFmpegArgs(args) }
+                if (!ok || !finalOutput.exists() || finalOutput.length() == 0L) {
                     appendLog("软字幕封装失败!")
-                    Log.e(TAG, "软字幕封装失败")
+                    Log.e(TAG, "软字幕失败: exists=${finalOutput.exists()}, size=${finalOutput.length()}")
                     runOnUiThread { onSynthesisFinished(false, "软字幕封装失败") }
                     return
                 }
             }
             SubtitleMode.NONE -> {
-                concatenatedFile.copyTo(finalOutput, overwrite = true)
+                withContext(Dispatchers.IO) {
+                    concatenatedFile.copyTo(finalOutput, overwrite = true)
+                }
             }
         }
         subtitleTime = System.currentTimeMillis() - subStart
-        appendLog("字幕处理完成 (${formatDuration(subtitleTime)})")
-        Log.d(TAG, "字幕处理完成: ${subtitleTime}ms")
+        appendLog("字幕处理完成 (${formatDuration(subtitleTime)}, ${formatSize(finalOutput.length())})")
 
         // ── 清理中间文件 ──
         appendLog("")
         appendLog("=== 清理中间文件 ===")
-        for (i in 1..segmentCount) {
-            File(workDir, "segment_$i.mp4").delete()
+        withContext(Dispatchers.IO) {
+            try {
+                for (i in 1..segmentCount) {
+                    File(workDir, "segment_$i.mp4").delete()
+                }
+                concatListFile.delete()
+                concatenatedFile.delete()
+            } catch (e: Exception) {
+                Log.w(TAG, "清理中间文件异常", e)
+            }
         }
-        concatListFile.delete()
-        concatenatedFile.delete()
         appendLog("清理完成")
 
-        // ── 完成 + 耗时分析 ──
+        // ── 耗时分析 ──
         val totalDuration = System.currentTimeMillis() - startTime
         val outputSize = finalOutput.length()
         val segTotal = segmentTimes.sum()
@@ -427,9 +452,8 @@ class MainActivity : AppCompatActivity() {
 
         Log.i(TAG, "===== 合成完成 =====")
         Log.i(TAG, "总耗时: ${totalDuration}ms")
-        Log.i(TAG, "片段编码: ${segTotal}ms (min=${segMin}ms, max=${segMax}ms, avg=${segAvg}ms)")
-        Log.i(TAG, "拼接: ${concatTime}ms")
-        Log.i(TAG, "字幕: ${subtitleTime}ms")
+        Log.i(TAG, "片段编码: ${segTotal}ms (min=${segMin}, max=${segMax}, avg=${segAvg})")
+        Log.i(TAG, "拼接: ${concatTime}ms, 字幕: ${subtitleTime}ms")
         Log.i(TAG, "输出: ${finalOutput.absolutePath}, $outputSize bytes")
 
         val resultInfo = buildResultInfo(
