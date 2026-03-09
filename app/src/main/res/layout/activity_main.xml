@@ -86,8 +86,9 @@
                     android:textSize="14sp"
                     android:textStyle="bold" />
 
-                <!-- Preset -->
+                <!-- Preset (仅软编码生效) -->
                 <TextView
+                    android:id="@+id/labelPreset"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="@string/label_preset"
@@ -95,6 +96,7 @@
                     android:textSize="13sp" />
 
                 <com.google.android.material.textfield.TextInputLayout
+                    android:id="@+id/tilPreset"
                     style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -115,8 +117,9 @@
                         android:popupBackground="@android:color/white" />
                 </com.google.android.material.textfield.TextInputLayout>
 
-                <!-- CRF -->
+                <!-- CRF (仅软编码生效) -->
                 <TextView
+                    android:id="@+id/labelCrf"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="@string/label_crf"
@@ -124,6 +127,7 @@
                     android:textSize="13sp" />
 
                 <LinearLayout
+                    android:id="@+id/layoutCrf"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:gravity="center_vertical"
@@ -336,10 +340,11 @@
                     android:id="@+id/scrollLog"
                     android:layout_width="match_parent"
                     android:layout_height="280dp"
-                    android:background="?attr/colorSurfaceVariant"
+                    android:background="@drawable/bg_log"
                     android:fadingEdge="vertical"
                     android:padding="12dp"
-                    android:requiresFadingEdge="vertical">
+                    android:requiresFadingEdge="vertical"
+                    android:overScrollMode="never">
 
                     <TextView
                         android:id="@+id/tvLog"

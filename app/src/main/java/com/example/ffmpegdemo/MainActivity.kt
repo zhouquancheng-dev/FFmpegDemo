@@ -100,6 +100,20 @@ class MainActivity : AppCompatActivity() {
             v.parent.requestDisallowInterceptTouchEvent(true)
             false
         }
+
+        // 异步检测硬件编码器，更新设备信息并隐藏软编码参数
+        lifecycleScope.launch {
+            useHwEncoder = withContext(Dispatchers.IO) { detectHwEncoder() }
+            val hwStatus = if (useHwEncoder) "支持" else "不支持"
+            tvDeviceInfo.append("\n硬编码: $hwStatus (h264_mediacodec)")
+            if (useHwEncoder) {
+                val gone = View.GONE
+                findViewById<View>(R.id.labelPreset).visibility = gone
+                findViewById<View>(R.id.tilPreset).visibility = gone
+                findViewById<View>(R.id.labelCrf).visibility = gone
+                findViewById<View>(R.id.layoutCrf).visibility = gone
+            }
+        }
     }
 
     private fun initViews() {
@@ -333,8 +347,6 @@ class MainActivity : AppCompatActivity() {
         var concatTime: Long
         var subtitleTime: Long
 
-        // 检测硬件编码器
-        useHwEncoder = withContext(Dispatchers.IO) { detectHwEncoder() }
         val encoderName = if (useHwEncoder) "h264_mediacodec (硬编码)" else "libx264 (软编码)"
         appendLog("编码器: $encoderName | preset=$preset, crf=$crf, 字幕=${subtitleMode.label}")
 
@@ -424,8 +436,8 @@ class MainActivity : AppCompatActivity() {
                 val fontDir = files.fontFile.parentFile!!.absolutePath
                 val vfValue = "subtitles=${subtitleFile.absolutePath}:" +
                     "fontsdir=${fontDir}:" +
-                    "force_style='FontName=Source Han Sans CN Medium,FontSize=12,PrimaryColour=&H00FFFFFF," +
-                    "OutlineColour=&H00000000,Outline=2,Shadow=1,MarginV=20'"
+                    "force_style='FontName=Source Han Sans CN Medium,FontSize=10,PrimaryColour=&H00FFFFFF," +
+                    "OutlineColour=&H00000000,Outline=1,Shadow=0,WrapStyle=0,MarginV=16'"
 
                 val args = if (useHwEncoder) {
                     arrayOf(
