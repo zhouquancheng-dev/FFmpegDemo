@@ -177,25 +177,26 @@
 
                     <RadioButton
                         android:id="@+id/rbHardSub"
-                        android:layout_width="wrap_content"
+                        android:layout_width="0dp"
                         android:layout_height="wrap_content"
+                        android:layout_weight="1"
                         android:checked="true"
                         android:text="@string/subtitle_hard"
                         android:textSize="13sp" />
 
                     <RadioButton
                         android:id="@+id/rbSoftSub"
-                        android:layout_width="wrap_content"
+                        android:layout_width="0dp"
                         android:layout_height="wrap_content"
-                        android:layout_marginStart="12dp"
+                        android:layout_weight="1"
                         android:text="@string/subtitle_soft"
                         android:textSize="13sp" />
 
                     <RadioButton
                         android:id="@+id/rbNoSub"
-                        android:layout_width="wrap_content"
+                        android:layout_width="0dp"
                         android:layout_height="wrap_content"
-                        android:layout_marginStart="12dp"
+                        android:layout_weight="1"
                         android:text="@string/subtitle_none"
                         android:textSize="13sp" />
                 </RadioGroup>

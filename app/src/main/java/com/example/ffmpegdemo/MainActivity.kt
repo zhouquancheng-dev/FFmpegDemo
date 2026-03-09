@@ -282,7 +282,7 @@ class MainActivity : AppCompatActivity() {
 
             sb.appendLine(i)
             sb.appendLine("${formatSrtTime(offsetMs)} --> ${formatSrtTime(offsetMs + durationMs)}")
-            sb.appendLine(segmentTexts[i - 1])
+            sb.appendLine(wrapText(segmentTexts[i - 1], 18))
             sb.appendLine()
 
             offsetMs += durationMs
@@ -290,6 +290,22 @@ class MainActivity : AppCompatActivity() {
 
         srtFile.writeText(sb.toString())
         return srtFile
+    }
+
+    private fun wrapText(text: String, maxChars: Int): String {
+        if (text.length <= maxChars) return text
+        val punctuation = setOf('，', '。', '、', '；', '！', '？', ',', '.', '!', '?')
+        val sb = StringBuilder()
+        var count = 0
+        for (ch in text) {
+            sb.append(ch)
+            count++
+            if (count >= maxChars && ch in punctuation) {
+                sb.append('\n')
+                count = 0
+            }
+        }
+        return sb.toString()
     }
 
     private fun getVideoDurationMs(file: File): Long {
@@ -437,7 +453,7 @@ class MainActivity : AppCompatActivity() {
                 val vfValue = "subtitles=${subtitleFile.absolutePath}:" +
                     "fontsdir=${fontDir}:" +
                     "force_style='FontName=Source Han Sans CN Medium,FontSize=10,PrimaryColour=&H00FFFFFF," +
-                    "OutlineColour=&H00000000,Outline=1,Shadow=0,WrapStyle=0,MarginV=16'"
+                    "OutlineColour=&H00000000,Outline=1,Shadow=0,MarginV=16'"
 
                 val args = if (useHwEncoder) {
                     arrayOf(
