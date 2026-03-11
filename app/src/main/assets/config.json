@@ -1,0 +1,20 @@
+{
+  "task_id": "1fb09ceb-3737-4cdb-82e2-95c31bcbd63e",
+  "audio_speed": 1.0,
+  "enable_motion": true,
+  "motion_intensity": "medium",
+  "fps": 30,
+  "subtitle": {
+    "margin_v": 100,
+    "font_color": "white",
+    "font_size": 14,
+    "split_long_text": true,
+    "max_chars_per_line": 15,
+    "enabled": true,
+    "outline_color": "black"
+  },
+  "music": {
+    "volume": 0.2,
+    "fade_out_sec": 1.0
+  }
+}

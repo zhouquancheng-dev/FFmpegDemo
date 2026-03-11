@@ -28,6 +28,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
@@ -39,25 +40,26 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "FFmpegDemo"
 
-        // ── 字幕样式 ──
-        private const val SUBTITLE_FONT_SIZE = 10       // libass 字体大小（基于 PlayResY=288）
-        private const val SUBTITLE_MARGIN_V = 24         // 字幕距底部距离（↑ 调大远离底边）
-        private const val SUBTITLE_OUTLINE = 1           // 描边宽度
+        // ── 字幕样式（像素值，通过 PlayResY=视频高度 映射到 libass） ──
+        private const val DEFAULT_SUBTITLE_FONT_SIZE = 14
+        private const val DEFAULT_SUBTITLE_MARGIN_V = 100
+        private const val DEFAULT_SUBTITLE_OUTLINE = 1
         private const val SUBTITLE_SHADOW = 0            // 阴影（0=无）
         private const val SUBTITLE_USABLE_WIDTH = 0.85   // 字幕可用宽度占比（用于计算每行最大字数）
+        private const val DEFAULT_MAX_CHARS_PER_LINE = 15
 
-        // ── 音频 ──
-        private const val BGM_FILENAME = "a_litte_story.mp3" // BGM 文件名（assets/data/ 下）
-        private const val BGM_VOLUME = 0.3               // 背景音乐音量（0.0~1.0）
-        private const val BGM_FADEOUT_SEC = 2             // amix dropout_transition 过渡秒数
+        // ── 音频（可被 config.json 覆盖） ──
+        private const val BGM_ASSET = "BackgroundMusic.mp3"
+        private const val DEFAULT_BGM_VOLUME = 0.2
+        private const val DEFAULT_BGM_FADEOUT_SEC = 1.0
         private const val AUDIO_BITRATE = "128k"         // 音频编码码率
 
         // ── 视频编码 ──
         private const val HW_ENCODER_BITRATE = "2M"      // 硬件编码器码率
         private const val FALLBACK_DURATION_MS = 3000L    // 片段时长探测失败时的 fallback
 
-        // ── 动效 ──
-        private const val TARGET_FPS = 25                // zoompan 帧率
+        // ── 动效（可被 config.json 覆盖） ──
+        private const val DEFAULT_FPS = 30
     }
 
     private lateinit var tvDeviceInfo: TextView
@@ -92,12 +94,26 @@ class MainActivity : AppCompatActivity() {
 
     private data class MotionTemplate(val name: String, val filter: String)
 
+    data class SynthesisConfig(
+        val fps: Int = DEFAULT_FPS,
+        val enableMotion: Boolean = true,
+        val motionIntensity: String = "medium",
+        val subtitleEnabled: Boolean = true,
+        val subtitleFontSize: Int = DEFAULT_SUBTITLE_FONT_SIZE,
+        val subtitleMarginV: Int = DEFAULT_SUBTITLE_MARGIN_V,
+        val subtitleOutline: Int = DEFAULT_SUBTITLE_OUTLINE,
+        val maxCharsPerLine: Int = DEFAULT_MAX_CHARS_PER_LINE,
+        val bgmVolume: Double = DEFAULT_BGM_VOLUME,
+        val bgmFadeOutSec: Double = DEFAULT_BGM_FADEOUT_SEC,
+    )
+
     data class WorkFiles(
         val workDir: File,
         val segmentTexts: List<String>,
         val fontFile: File,
         val bgmFile: File,
-        val finalOutput: File
+        val finalOutput: File,
+        val config: SynthesisConfig = SynthesisConfig()
     )
 
     @SuppressLint("ClickableViewAccessibility")
@@ -274,8 +290,13 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // 读取 config.json 配置
+        val config = parseConfig(
+            assets.open("config.json").bufferedReader().use { it.readText() }
+        )
+
         // 从 segments.json 读取片段信息，动态确定片段数
-        val jsonStr = assets.open("data/segments.json").bufferedReader().use { it.readText() }
+        val jsonStr = assets.open("segments.json").bufferedReader().use { it.readText() }
         val jsonArray = JSONArray(jsonStr)
         val segmentTexts = mutableListOf<String>()
         for (i in 0 until jsonArray.length()) {
@@ -287,21 +308,39 @@ class MainActivity : AppCompatActivity() {
         for (i in 1..segmentTexts.size) {
             val segDir = File(workDir, "seg_$i")
             segDir.mkdirs()
-            val assetDir = "data/seg_%02d".format(i)
+            val assetDir = "seg_%02d".format(i)
             copyAsset("$assetDir/image.png", segDir)
             copyAsset("$assetDir/audio.wav", segDir)
         }
 
         // 复制字体到工作目录（libass 需要文件系统路径，无法直接读取 APK 内资源）
-        val fontFile = File(workDir, "font.otf")
-        if (!fontFile.exists()) copyAsset("data/font.otf", workDir)
+        val fontFile = File(workDir, "subtitle_font.otf")
+        if (!fontFile.exists()) copyAsset("subtitle_font.otf", workDir)
 
         // 复制背景音乐到工作目录
-        val bgmFile = File(workDir, BGM_FILENAME)
-        if (!bgmFile.exists()) copyAsset("data/$BGM_FILENAME", workDir)
+        val bgmFile = File(workDir, BGM_ASSET)
+        if (!bgmFile.exists()) copyAsset(BGM_ASSET, workDir)
 
         val finalOutput = File(workDir, "output.mp4")
-        WorkFiles(workDir, segmentTexts, fontFile, bgmFile, finalOutput)
+        WorkFiles(workDir, segmentTexts, fontFile, bgmFile, finalOutput, config)
+    }
+
+    private fun parseConfig(jsonStr: String): SynthesisConfig {
+        val obj = JSONObject(jsonStr)
+        val sub = obj.optJSONObject("subtitle")
+        val music = obj.optJSONObject("music")
+        return SynthesisConfig(
+            fps = obj.optInt("fps", DEFAULT_FPS),
+            enableMotion = obj.optBoolean("enable_motion", true),
+            motionIntensity = obj.optString("motion_intensity", "medium"),
+            subtitleEnabled = sub?.optBoolean("enabled", true) ?: true,
+            subtitleFontSize = sub?.optInt("font_size", DEFAULT_SUBTITLE_FONT_SIZE) ?: DEFAULT_SUBTITLE_FONT_SIZE,
+            subtitleMarginV = sub?.optInt("margin_v", DEFAULT_SUBTITLE_MARGIN_V) ?: DEFAULT_SUBTITLE_MARGIN_V,
+            subtitleOutline = sub?.optInt("outline", DEFAULT_SUBTITLE_OUTLINE) ?: DEFAULT_SUBTITLE_OUTLINE,
+            maxCharsPerLine = sub?.optInt("max_chars_per_line", DEFAULT_MAX_CHARS_PER_LINE) ?: DEFAULT_MAX_CHARS_PER_LINE,
+            bgmVolume = music?.optDouble("volume", DEFAULT_BGM_VOLUME) ?: DEFAULT_BGM_VOLUME,
+            bgmFadeOutSec = music?.optDouble("fade_out_sec", DEFAULT_BGM_FADEOUT_SEC) ?: DEFAULT_BGM_FADEOUT_SEC,
+        )
     }
 
     private fun copyAsset(assetName: String, destDir: File): File {
@@ -316,38 +355,93 @@ class MainActivity : AppCompatActivity() {
         return destFile
     }
 
-    private fun generateSrtFromSegments(workDir: File, segmentTexts: List<String>): File {
-        val srtFile = File(workDir, "subtitles.srt")
-        val sb = StringBuilder()
+    /**
+     * 收集各片段的字幕时间轴：List<Triple<startMs, endMs, text>>
+     */
+    private fun collectSubtitleEvents(
+        workDir: File, segmentTexts: List<String>, maxChars: Int
+    ): List<Triple<Long, Long, String>> {
+        val events = mutableListOf<Triple<Long, Long, String>>()
         var offsetMs = 0L
-        var srtIndex = 1
-
-        // 从第一个片段探测视频尺寸，计算每行最大字符数
-        val maxChars = calcMaxCharsPerLine(File(workDir, "segment_1.mp4"))
-
         for (i in 1..segmentTexts.size) {
             val durationMs = (getMediaDurationSec(File(workDir, "segment_$i.mp4"))?.times(1000))?.toLong() ?: -1
             if (durationMs <= 0) {
                 offsetMs += FALLBACK_DURATION_MS
                 continue
             }
-
-            // 按标点拆分成多条短句，每条独立分配时间
             val sentences = splitBySentence(segmentTexts[i - 1], maxChars)
             val totalChars = sentences.sumOf { it.length }.coerceAtLeast(1)
-
             for (sentence in sentences) {
                 val sentenceMs = (durationMs * sentence.length / totalChars.toDouble()).toLong()
-                sb.appendLine(srtIndex++)
-                sb.appendLine("${formatSrtTime(offsetMs)} --> ${formatSrtTime(offsetMs + sentenceMs)}")
-                sb.appendLine(sentence)
-                sb.appendLine()
+                    .coerceAtLeast(1)
+                events.add(Triple(offsetMs, offsetMs + sentenceMs, sentence))
                 offsetMs += sentenceMs
             }
         }
+        return events
+    }
 
+    /** 生成 SRT 字幕文件（用于软字幕 / 无字幕模式） */
+    private fun generateSrtFromSegments(workDir: File, segmentTexts: List<String>, config: SynthesisConfig): File {
+        val maxChars = if (config.maxCharsPerLine > 0) config.maxCharsPerLine
+            else calcMaxCharsPerLine(File(workDir, "segment_1.mp4"))
+        val events = collectSubtitleEvents(workDir, segmentTexts, maxChars)
+
+        val sb = StringBuilder()
+        events.forEachIndexed { idx, (startMs, endMs, text) ->
+            sb.appendLine(idx + 1)
+            sb.appendLine("${formatSrtTime(startMs)} --> ${formatSrtTime(endMs)}")
+            sb.appendLine(text)
+            sb.appendLine()
+        }
+        val srtFile = File(workDir, "subtitles.srt")
         srtFile.writeText(sb.toString())
         return srtFile
+    }
+
+    /**
+     * 生成 ASS 字幕文件（用于硬字幕烧录）
+     * PlayResY 写入 [Script Info]，FontSize / MarginV 等值直接以像素为单位
+     */
+    private fun generateAssFromSegments(
+        workDir: File, segmentTexts: List<String>, config: SynthesisConfig, videoHeight: Int
+    ): File {
+        val maxChars = if (config.maxCharsPerLine > 0) config.maxCharsPerLine
+            else calcMaxCharsPerLine(File(workDir, "segment_1.mp4"))
+        val events = collectSubtitleEvents(workDir, segmentTexts, maxChars)
+
+        val sb = StringBuilder()
+        // ── [Script Info] ──
+        sb.appendLine("[Script Info]")
+        sb.appendLine("ScriptType: v4.00+")
+        sb.appendLine("PlayResY: $videoHeight")
+        sb.appendLine()
+
+        // ── [V4+ Styles] ──
+        sb.appendLine("[V4+ Styles]")
+        sb.appendLine("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding")
+        sb.appendLine("Style: Default,Source Han Sans CN Medium,${config.subtitleFontSize},&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,${config.subtitleOutline},$SUBTITLE_SHADOW,2,10,10,${config.subtitleMarginV},1")
+        sb.appendLine()
+
+        // ── [Events] ──
+        sb.appendLine("[Events]")
+        sb.appendLine("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text")
+        for ((startMs, endMs, text) in events) {
+            sb.appendLine("Dialogue: 0,${formatAssTime(startMs)},${formatAssTime(endMs)},Default,,0,0,0,,${text}")
+        }
+
+        val assFile = File(workDir, "subtitles.ass")
+        assFile.writeText(sb.toString())
+        return assFile
+    }
+
+    /** ASS 时间格式 H:MM:SS.cc（精度 10ms） */
+    private fun formatAssTime(ms: Long): String {
+        val h = ms / 3600000
+        val m = (ms % 3600000) / 60000
+        val s = (ms % 60000) / 1000
+        val cs = (ms % 1000) / 10
+        return "%d:%02d:%02d.%02d".format(h, m, s, cs)
     }
 
     /**
@@ -397,18 +491,17 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * 根据视频尺寸和字幕 FontSize 计算每行最大字符数
-     * libass 默认 PlayResY=288，中文字符近似等宽（宽≈高）
+     * 使用 PlayResY=视频高度 的像素坐标，中文字符近似等宽（宽≈高）
      */
-    private fun calcMaxCharsPerLine(videoFile: File, fontSize: Int = SUBTITLE_FONT_SIZE): Int {
+    private fun calcMaxCharsPerLine(videoFile: File, fontSize: Int = DEFAULT_SUBTITLE_FONT_SIZE): Int {
         val info = FFprobeKit.getMediaInformation(videoFile.absolutePath).mediaInformation
         if (info != null) {
             val stream = info.streams?.firstOrNull { it.width != null && it.height != null }
             if (stream != null) {
                 val videoWidth = stream.width.toDouble()
-                val videoHeight = stream.height.toDouble()
-                val charPixelWidth = fontSize * videoHeight / 288.0
+                // PlayResY=视频高度时，fontSize 直接就是像素值
                 val usableWidth = videoWidth * SUBTITLE_USABLE_WIDTH
-                val calculated = (usableWidth / charPixelWidth).toInt()
+                val calculated = (usableWidth / fontSize).toInt()
                 if (calculated > 0) return calculated
             }
         }
@@ -438,7 +531,8 @@ class MainActivity : AppCompatActivity() {
         mode: MotionMode,
         lastIndex: Int,
         width: Int = 1280,
-        height: Int = 720
+        height: Int = 720,
+        fps: Int = DEFAULT_FPS
     ): Triple<String, String, Int> {
         val zoomRange = when (mode) {
             MotionMode.SUBTLE -> 0.10
@@ -447,7 +541,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         // 保持浮点精度，d=1 配合 -loop 1 逐帧处理
-        val totalFrames = (durationSec * TARGET_FPS).coerceAtLeast(1.0)
+        val totalFrames = (durationSec * fps).coerceAtLeast(1.0)
         val s = "${width}x${height}"
         // 缓动: ease-in-out  t=on/total → (sin(t*PI - PI/2)+1)/2
         val ease = "((sin(on/$totalFrames*PI-PI/2)+1)/2)"
@@ -457,17 +551,17 @@ class MainActivity : AppCompatActivity() {
         val cy = "max(0\\,($height-ih*zoom)/2)"
         val templates = listOf(
             MotionTemplate("中心放大",
-                "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=$cx:y=$cy:s=$s"),
+                "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$fps:x=$cx:y=$cy:s=$s"),
             MotionTemplate("中心缩小",
-                "zoompan=z=1+${zoomRange}-${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=$cx:y=$cy:s=$s"),
+                "zoompan=z=1+${zoomRange}-${zoomRange}*($ease):d=1:fps=$fps:x=$cx:y=$cy:s=$s"),
             MotionTemplate("左移右",
-                "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=max(0\\,($width-iw*zoom)*($ease)):y=$cy:s=$s"),
+                "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$fps:x=max(0\\,($width-iw*zoom)*($ease)):y=$cy:s=$s"),
             MotionTemplate("右移左",
-                "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=max(0\\,($width-iw*zoom)*(1-$ease)):y=$cy:s=$s"),
+                "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$fps:x=max(0\\,($width-iw*zoom)*(1-$ease)):y=$cy:s=$s"),
             MotionTemplate("上移下",
-                "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=$cx:y=max(0\\,($height-ih*zoom)*($ease)):s=$s"),
+                "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$fps:x=$cx:y=max(0\\,($height-ih*zoom)*($ease)):s=$s"),
             MotionTemplate("下移上",
-                "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$TARGET_FPS:x=$cx:y=max(0\\,($height-ih*zoom)*(1-$ease)):s=$s")
+                "zoompan=z=1+${zoomRange}*($ease):d=1:fps=$fps:x=$cx:y=max(0\\,($height-ih*zoom)*(1-$ease)):s=$s")
         )
 
         // 相邻不重复的随机选取
@@ -524,6 +618,7 @@ class MainActivity : AppCompatActivity() {
         val segCount = files.segmentTexts.size
         val totalSteps = segCount + 2
 
+        val config = files.config
         val segmentTimes = mutableListOf<Long>()
         var concatTime: Long
         var subtitleTime: Long
@@ -556,7 +651,7 @@ class MainActivity : AppCompatActivity() {
                 val imgSize = withContext(Dispatchers.IO) { getImageSize(imageFile) }
                 val result = getRandomMotionEffect(
                     audioDurationSec, motionMode, lastMotionIndex,
-                    imgSize.first, imgSize.second
+                    imgSize.first, imgSize.second, config.fps
                 )
                 lastMotionIndex = result.third
                 motionFilter = result.first
@@ -594,10 +689,9 @@ class MainActivity : AppCompatActivity() {
             appendLog("  $i/$segCount  ${formatDuration(segCost)}  ${formatSize(segOutputFile.length())}")
         }
 
-        // 探测每个片段视频时长，动态生成 SRT 字幕文件
-        val subtitleFile = withContext(Dispatchers.IO) {
-            generateSrtFromSegments(workDir, files.segmentTexts)
-        }
+        // 字幕文件在拼接后、根据字幕模式选择格式生成
+        var srtFile: File? = null
+        var assFile: File? = null
 
         // ── Step 2: 拼接 ──
         updateProgress(segCount + 1, totalSteps, "拼接所有片段")
@@ -637,16 +731,32 @@ class MainActivity : AppCompatActivity() {
         val bgmFile = files.bgmFile
         val subStart = System.currentTimeMillis()
 
-        // BGM 混音滤镜：BGM 循环播放、音量 30%，以视频时长为准
-        val audioFilter = "[1:a]volume=$BGM_VOLUME[bgm];[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=$BGM_FADEOUT_SEC[aout]"
+        // BGM 混音滤镜：BGM 循环播放，以视频时长为准
+        val audioFilter = "[1:a]volume=${config.bgmVolume}[bgm];[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=${config.bgmFadeOutSec}[aout]"
+
+        // 探测拼接视频高度，用于 ASS 文件的 PlayResY
+        val videoHeight = withContext(Dispatchers.IO) {
+            val info = FFprobeKit.getMediaInformation(concatenatedFile.absolutePath).mediaInformation
+            info?.streams?.firstOrNull { it.height != null }?.height?.toInt() ?: 720
+        }
+
+        // 根据字幕模式生成对应格式
+        when (subtitleMode) {
+            SubtitleMode.HARD -> assFile = withContext(Dispatchers.IO) {
+                generateAssFromSegments(workDir, files.segmentTexts, config, videoHeight)
+            }
+            SubtitleMode.SOFT -> srtFile = withContext(Dispatchers.IO) {
+                generateSrtFromSegments(workDir, files.segmentTexts, config)
+            }
+            SubtitleMode.NONE -> { /* 不生成字幕文件 */ }
+        }
 
         when (subtitleMode) {
             SubtitleMode.HARD -> {
                 val escapePath = { p: String -> p.replace("\\", "\\\\").replace(":", "\\:") }
-                val vfValue = "subtitles=${escapePath(subtitleFile.absolutePath)}:" +
-                    "fontsdir=${escapePath(files.fontFile.parentFile!!.absolutePath)}:" +
-                    "force_style='FontName=Source Han Sans CN Medium,FontSize=$SUBTITLE_FONT_SIZE,PrimaryColour=&H00FFFFFF," +
-                    "OutlineColour=&H00000000,Outline=$SUBTITLE_OUTLINE,Shadow=$SUBTITLE_SHADOW,MarginV=$SUBTITLE_MARGIN_V'"
+                // 样式已写入 ASS 文件头，只需指定 fontsdir
+                val vfValue = "subtitles=${escapePath(assFile!!.absolutePath)}:" +
+                    "fontsdir=${escapePath(files.fontFile.parentFile!!.absolutePath)}"
 
                 val encoderArgs = if (useHwEncoder) {
                     arrayOf("-c:v", "h264_mediacodec", "-b:v", HW_ENCODER_BITRATE)
@@ -673,7 +783,7 @@ class MainActivity : AppCompatActivity() {
                 val args = arrayOf(
                     "-i", concatenatedFile.absolutePath,
                     "-stream_loop", "-1", "-i", bgmFile.absolutePath,
-                    "-i", subtitleFile.absolutePath,
+                    "-i", srtFile!!.absolutePath,
                     "-filter_complex", audioFilter,
                     "-map", "0:v", "-map", "[aout]", "-map", "2",
                     "-c:v", "copy", "-c:a", "aac", "-b:a", AUDIO_BITRATE, "-c:s", "mov_text",
@@ -706,9 +816,13 @@ class MainActivity : AppCompatActivity() {
         subtitleTime = System.currentTimeMillis() - subStart
         appendLog("  完成 ${formatDuration(subtitleTime)}  ${formatSize(finalOutput.length())}")
 
-        // ── 输出 SRT 内容供调试查看 ──
-        appendLog("\n═══════════ SRT 字幕内容 ═══════════")
-        appendLog(subtitleFile.readText().trimEnd())
+        // ── 输出字幕内容供调试查看 ──
+        val subtitleDebugFile = assFile ?: srtFile
+        if (subtitleDebugFile != null) {
+            val label = if (assFile != null) "ASS" else "SRT"
+            appendLog("\n═══════════ $label 字幕内容 ═══════════")
+            appendLog(subtitleDebugFile.readText().trimEnd())
+        }
 
         // ── 清理中间文件 ──
         withContext(Dispatchers.IO) {
@@ -716,7 +830,8 @@ class MainActivity : AppCompatActivity() {
                 for (i in 1..segCount) File(workDir, "segment_$i.mp4").delete()
                 concatListFile.delete()
                 concatenatedFile.delete()
-                subtitleFile.delete()
+                assFile?.delete()
+                srtFile?.delete()
             } catch (_: Exception) {}
         }
 
