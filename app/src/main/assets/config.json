@@ -7,7 +7,7 @@
   "subtitle": {
     "margin_v": 100,
     "font_color": "white",
-    "font_size": 14,
+    "font_size": 36,
     "split_long_text": true,
     "max_chars_per_line": 15,
     "enabled": true,

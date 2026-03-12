@@ -41,9 +41,10 @@ class MainActivity : AppCompatActivity() {
         private const val TAG = "FFmpegDemo"
 
         // ── 字幕样式（像素值，通过 PlayResY=视频高度 映射到 libass） ──
-        private const val DEFAULT_SUBTITLE_FONT_SIZE = 14
+        private const val DEFAULT_SUBTITLE_FONT_NAME = "Source Han Sans CN Normal"
+        private const val DEFAULT_SUBTITLE_FONT_SIZE = 36
         private const val DEFAULT_SUBTITLE_MARGIN_V = 100
-        private const val DEFAULT_SUBTITLE_OUTLINE = 1
+        private const val DEFAULT_SUBTITLE_OUTLINE = 2
         private const val SUBTITLE_SHADOW = 0            // 阴影（0=无）
         private const val SUBTITLE_USABLE_WIDTH = 0.85   // 字幕可用宽度占比（用于计算每行最大字数）
         private const val DEFAULT_MAX_CHARS_PER_LINE = 15
@@ -404,7 +405,11 @@ class MainActivity : AppCompatActivity() {
      * PlayResY 写入 [Script Info]，FontSize / MarginV 等值直接以像素为单位
      */
     private fun generateAssFromSegments(
-        workDir: File, segmentTexts: List<String>, config: SynthesisConfig, videoHeight: Int
+        workDir: File,
+        segmentTexts: List<String>,
+        config: SynthesisConfig,
+        videoWidth: Int,
+        videoHeight: Int
     ): File {
         val maxChars = if (config.maxCharsPerLine > 0) config.maxCharsPerLine
             else calcMaxCharsPerLine(File(workDir, "segment_1.mp4"))
@@ -414,20 +419,21 @@ class MainActivity : AppCompatActivity() {
         // ── [Script Info] ──
         sb.appendLine("[Script Info]")
         sb.appendLine("ScriptType: v4.00+")
+        sb.appendLine("PlayResX: $videoWidth")
         sb.appendLine("PlayResY: $videoHeight")
         sb.appendLine()
 
         // ── [V4+ Styles] ──
         sb.appendLine("[V4+ Styles]")
         sb.appendLine("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding")
-        sb.appendLine("Style: Default,Source Han Sans CN Medium,${config.subtitleFontSize},&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,${config.subtitleOutline},$SUBTITLE_SHADOW,2,10,10,${config.subtitleMarginV},1")
+        sb.appendLine("Style: Default,$DEFAULT_SUBTITLE_FONT_NAME,${config.subtitleFontSize},&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,${config.subtitleOutline},$SUBTITLE_SHADOW,2,10,10,${config.subtitleMarginV},1")
         sb.appendLine()
 
         // ── [Events] ──
         sb.appendLine("[Events]")
         sb.appendLine("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text")
         for ((startMs, endMs, text) in events) {
-            sb.appendLine("Dialogue: 0,${formatAssTime(startMs)},${formatAssTime(endMs)},Default,,0,0,0,,${text}")
+            sb.appendLine("Dialogue: 0,${formatAssTime(startMs)},${formatAssTime(endMs)},Default,,0,0,0,,${escapeAssText(text)}")
         }
 
         val assFile = File(workDir, "subtitles.ass")
@@ -442,6 +448,15 @@ class MainActivity : AppCompatActivity() {
         val s = (ms % 60000) / 1000
         val cs = (ms % 1000) / 10
         return "%d:%02d:%02d.%02d".format(h, m, s, cs)
+    }
+
+    private fun escapeAssText(text: String): String {
+        return text
+            .replace("\\", "\\\\")
+            .replace("{", "\\{")
+            .replace("}", "\\}")
+            .replace("\r\n", "\\N")
+            .replace("\n", "\\N")
     }
 
     /**
@@ -735,15 +750,22 @@ class MainActivity : AppCompatActivity() {
         val audioFilter = "[1:a]volume=${config.bgmVolume}[bgm];[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=${config.bgmFadeOutSec}[aout]"
 
         // 探测拼接视频高度，用于 ASS 文件的 PlayResY
-        val videoHeight = withContext(Dispatchers.IO) {
+        val videoSize = withContext(Dispatchers.IO) {
             val info = FFprobeKit.getMediaInformation(concatenatedFile.absolutePath).mediaInformation
-            info?.streams?.firstOrNull { it.height != null }?.height?.toInt() ?: 720
+            val stream = info?.streams?.firstOrNull { it.width != null && it.height != null }
+            Pair(stream?.width?.toInt() ?: 1280, stream?.height?.toInt() ?: 720)
         }
 
         // 根据字幕模式生成对应格式
         when (subtitleMode) {
             SubtitleMode.HARD -> assFile = withContext(Dispatchers.IO) {
-                generateAssFromSegments(workDir, files.segmentTexts, config, videoHeight)
+                generateAssFromSegments(
+                    workDir = workDir,
+                    segmentTexts = files.segmentTexts,
+                    config = config,
+                    videoWidth = videoSize.first,
+                    videoHeight = videoSize.second
+                )
             }
             SubtitleMode.SOFT -> srtFile = withContext(Dispatchers.IO) {
                 generateSrtFromSegments(workDir, files.segmentTexts, config)
@@ -787,6 +809,7 @@ class MainActivity : AppCompatActivity() {
                     "-filter_complex", audioFilter,
                     "-map", "0:v", "-map", "[aout]", "-map", "2",
                     "-c:v", "copy", "-c:a", "aac", "-b:a", AUDIO_BITRATE, "-c:s", "mov_text",
+                    "-disposition:s:0", "default",
                     "-y", finalOutput.absolutePath
                 )
                 val ok = withContext(Dispatchers.IO) { executeFFmpegArgs(args) }
