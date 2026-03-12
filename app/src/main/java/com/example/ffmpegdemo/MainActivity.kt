@@ -749,7 +749,31 @@ class MainActivity : AppCompatActivity() {
         val lastLogLine: String? = null
     )
 
+    private data class ProgressStage(
+        val basePercent: Int,
+        val weightPercent: Int,
+        val overallStep: Int,
+        val totalSteps: Int,
+        val description: String
+    )
+
     private fun formatSeconds(seconds: Double): String = "%.2fs".format(Locale.US, seconds)
+
+    private fun updateProgressForStage(stage: ProgressStage, stagePercent: Int) {
+        val boundedStagePercent = stagePercent.coerceIn(0, 100)
+        val overallPercent = (stage.basePercent + stage.weightPercent * boundedStagePercent / 100)
+            .coerceIn(0, 100)
+        runOnUiThread {
+            progressBar.setProgress(overallPercent, true)
+            tvProgress.text = getString(
+                R.string.fmt_progress,
+                stage.overallStep,
+                stage.totalSteps,
+                overallPercent,
+                stage.description
+            )
+        }
+    }
 
     private fun buildBgmAudioFilter(config: SynthesisConfig, videoDurationMs: Long): String {
         val durationSec = (videoDurationMs / 1000.0).coerceAtLeast(0.0)
@@ -774,11 +798,13 @@ class MainActivity : AppCompatActivity() {
     private suspend fun executeFFmpegArgs(
         args: Array<String>,
         stageLabel: String,
-        expectedDurationMs: Long? = null
+        expectedDurationMs: Long? = null,
+        progressStage: ProgressStage? = null
     ): ExecutionResult =
         suspendCancellableCoroutine { cont ->
             var lastLogLine: String? = null
             var lastStatsSecond = -1L
+            var lastProgressPercent = -1
             val session = FFmpegKit.executeWithArgumentsAsync(args,
                 { s ->
                     if (cont.isActive) {
@@ -797,15 +823,19 @@ class MainActivity : AppCompatActivity() {
                 },
                 { statistics ->
                     if (expectedDurationMs != null && expectedDurationMs > 0L) {
+                        val encodedMs = statistics.time.toLong().coerceAtLeast(0L)
+                        val progressPercent = (encodedMs * 100L / expectedDurationMs).toInt().coerceIn(0, 99)
+                        if (progressPercent > lastProgressPercent) {
+                            lastProgressPercent = progressPercent
+                            progressStage?.let { updateProgressForStage(it, progressPercent) }
+                        }
                         val currentSecond = statistics.time.toLong() / 1000L
                         if (currentSecond > lastStatsSecond && currentSecond % 2L == 0L) {
                             lastStatsSecond = currentSecond
-                            val encodedMs = statistics.time.toLong().coerceAtLeast(0L)
-                            val pct = (encodedMs * 100L / expectedDurationMs).coerceIn(0L, 99L)
                             appendLog(
                                 "%s 进度 %d%% (%s/%s)".format(
                                     stageLabel,
-                                    pct,
+                                    progressPercent,
                                     formatSeconds(encodedMs / 1000.0),
                                     formatSeconds(expectedDurationMs / 1000.0)
                                 )
@@ -857,7 +887,15 @@ class MainActivity : AppCompatActivity() {
         var lastMotionIndex = -1  // 用于相邻不重复
         for ((ordinal, segment) in files.segments.withIndex()) {
             val stepIndex = ordinal + 1
-            updateProgress(stepIndex, totalSteps, "生成片段 %d/%d".format(stepIndex, segCount))
+            val segmentDescription = "生成片段 %d/%d".format(stepIndex, segCount)
+            updateProgress(stepIndex, totalSteps, segmentDescription)
+            val segmentStage = ProgressStage(
+                basePercent = ((stepIndex - 1) * 100) / totalSteps,
+                weightPercent = 100 / totalSteps,
+                overallStep = stepIndex,
+                totalSteps = totalSteps,
+                description = segmentDescription
+            )
 
             val segOutputFile = File(workDir, "segment_%d.mp4".format(segment.index))
 
@@ -907,7 +945,8 @@ class MainActivity : AppCompatActivity() {
                 executeFFmpegArgs(
                     args = args.toTypedArray(),
                     stageLabel = "片段 %d".format(segment.index),
-                    expectedDurationMs = segment.adjustedDurationMs
+                    expectedDurationMs = segment.adjustedDurationMs,
+                    progressStage = segmentStage
                 )
             }
             val segCost = System.currentTimeMillis() - segStart
@@ -921,6 +960,7 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread { onSynthesisFinished(false, "片段 %d 编码失败".format(segment.index)) }
                 return
             }
+            updateProgressForStage(segmentStage, 100)
             appendLog("  %d/%d  %s  %s".format(stepIndex, segCount, formatDuration(segCost), formatSize(segOutputFile.length())))
         }
 
@@ -929,8 +969,16 @@ class MainActivity : AppCompatActivity() {
         var assFile: File? = null
 
         // ── Step 2: 拼接 ──
-        updateProgress(segCount + 1, totalSteps, "拼接所有片段")
+        val concatDescription = "拼接所有片段"
+        updateProgress(segCount + 1, totalSteps, concatDescription)
         appendLog("\n▶ 第二步: 拼接所有片段")
+        val concatStage = ProgressStage(
+            basePercent = (segCount * 100) / totalSteps,
+            weightPercent = 100 / totalSteps,
+            overallStep = segCount + 1,
+            totalSteps = totalSteps,
+            description = concatDescription
+        )
 
         val concatListFile = File(workDir, "concat_list.txt")
         concatListFile.writeText(buildString {
@@ -950,7 +998,11 @@ class MainActivity : AppCompatActivity() {
 
         val concatStart = System.currentTimeMillis()
         val concatResult = withContext(Dispatchers.IO) {
-            executeFFmpegArgs(concatArgs, stageLabel = "拼接")
+            executeFFmpegArgs(
+                concatArgs,
+                stageLabel = "拼接",
+                progressStage = concatStage
+            )
         }
         concatTime = System.currentTimeMillis() - concatStart
 
@@ -962,11 +1014,20 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread { onSynthesisFinished(false, "拼接失败") }
             return
         }
+        updateProgressForStage(concatStage, 100)
         appendLog("  完成 ${formatDuration(concatTime)}  ${formatSize(concatenatedFile.length())}")
 
         // ── Step 3: 字幕 + BGM 混音 ──
-        updateProgress(segCount + 2, totalSteps, "字幕 + BGM 混音")
+        val finalDescription = "字幕 + BGM 混音"
+        updateProgress(segCount + 2, totalSteps, finalDescription)
         appendLog("\n▶ 第三步: 字幕处理 (${subtitleMode.label}) + BGM 混音")
+        val finalStage = ProgressStage(
+            basePercent = ((segCount + 1) * 100) / totalSteps,
+            weightPercent = 100 - ((segCount + 1) * 100) / totalSteps,
+            overallStep = segCount + 2,
+            totalSteps = totalSteps,
+            description = finalDescription
+        )
 
         val finalOutput = files.finalOutput
         val bgmFile = files.bgmFile
@@ -1012,7 +1073,12 @@ class MainActivity : AppCompatActivity() {
                     "-y", finalOutput.absolutePath
                 )
                 val result = withContext(Dispatchers.IO) {
-                    executeFFmpegArgs(args, stageLabel = "字幕+BGM", expectedDurationMs = videoDurationMs)
+                    executeFFmpegArgs(
+                        args,
+                        stageLabel = "字幕+BGM",
+                        expectedDurationMs = videoDurationMs,
+                        progressStage = finalStage
+                    )
                 }
                 if (result.cancelled) throw CancellationException("硬字幕烧录已取消")
                 if (!result.success || !finalOutput.exists() || finalOutput.length() == 0L) {
@@ -1034,7 +1100,12 @@ class MainActivity : AppCompatActivity() {
                     "-y", finalOutput.absolutePath
                 )
                 val result = withContext(Dispatchers.IO) {
-                    executeFFmpegArgs(args, stageLabel = "字幕+BGM", expectedDurationMs = videoDurationMs)
+                    executeFFmpegArgs(
+                        args,
+                        stageLabel = "字幕+BGM",
+                        expectedDurationMs = videoDurationMs,
+                        progressStage = finalStage
+                    )
                 }
                 if (result.cancelled) throw CancellationException("软字幕封装已取消")
                 if (!result.success || !finalOutput.exists() || finalOutput.length() == 0L) {
@@ -1054,7 +1125,12 @@ class MainActivity : AppCompatActivity() {
                     "-y", finalOutput.absolutePath
                 )
                 val result = withContext(Dispatchers.IO) {
-                    executeFFmpegArgs(args, stageLabel = "BGM", expectedDurationMs = videoDurationMs)
+                    executeFFmpegArgs(
+                        args,
+                        stageLabel = "BGM",
+                        expectedDurationMs = videoDurationMs,
+                        progressStage = finalStage
+                    )
                 }
                 if (result.cancelled) throw CancellationException("BGM 混音已取消")
                 if (!result.success || !finalOutput.exists() || finalOutput.length() == 0L) {
@@ -1066,6 +1142,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         subtitleTime = System.currentTimeMillis() - subStart
+        updateProgressForStage(finalStage, 100)
         appendLog("  完成 ${formatDuration(subtitleTime)}  ${formatSize(finalOutput.length())}")
 
         // ── 输出字幕内容供调试查看 ──
