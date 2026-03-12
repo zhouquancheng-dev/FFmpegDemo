@@ -2,6 +2,7 @@ package com.example.ffmpegdemo
 
 import android.annotation.SuppressLint
 import android.content.Intent
+import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -34,6 +35,7 @@ import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.*
 import kotlin.coroutines.resume
+import androidx.core.graphics.toColorInt
 
 class MainActivity : AppCompatActivity() {
 
@@ -45,6 +47,10 @@ class MainActivity : AppCompatActivity() {
         private const val DEFAULT_SUBTITLE_FONT_SIZE = 36
         private const val DEFAULT_SUBTITLE_MARGIN_V = 100
         private const val DEFAULT_SUBTITLE_OUTLINE = 2
+        private const val DEFAULT_SUBTITLE_FONT_COLOR = "white"
+        private const val DEFAULT_SUBTITLE_OUTLINE_COLOR = "black"
+        private const val DEFAULT_AUDIO_SPEED = 1.0
+        private const val DEFAULT_SUBTITLE_MODE = "hard"
         private const val SUBTITLE_SHADOW = 0            // 阴影（0=无）
         private const val SUBTITLE_USABLE_WIDTH = 0.85   // 字幕可用宽度占比（用于计算每行最大字数）
         private const val DEFAULT_MAX_CHARS_PER_LINE = 15
@@ -96,13 +102,18 @@ class MainActivity : AppCompatActivity() {
     private data class MotionTemplate(val name: String, val filter: String)
 
     data class SynthesisConfig(
+        val taskId: String = "",
+        val audioSpeed: Double = DEFAULT_AUDIO_SPEED,
         val fps: Int = DEFAULT_FPS,
         val enableMotion: Boolean = true,
         val motionIntensity: String = "medium",
         val subtitleEnabled: Boolean = true,
+        val subtitleMode: String = DEFAULT_SUBTITLE_MODE,
         val subtitleFontSize: Int = DEFAULT_SUBTITLE_FONT_SIZE,
         val subtitleMarginV: Int = DEFAULT_SUBTITLE_MARGIN_V,
         val subtitleOutline: Int = DEFAULT_SUBTITLE_OUTLINE,
+        val subtitleFontColor: String = DEFAULT_SUBTITLE_FONT_COLOR,
+        val subtitleOutlineColor: String = DEFAULT_SUBTITLE_OUTLINE_COLOR,
         val maxCharsPerLine: Int = DEFAULT_MAX_CHARS_PER_LINE,
         val bgmVolume: Double = DEFAULT_BGM_VOLUME,
         val bgmFadeOutSec: Double = DEFAULT_BGM_FADEOUT_SEC,
@@ -138,6 +149,11 @@ class MainActivity : AppCompatActivity() {
         setupPresetSpinner()
         setupCrfSlider()
         setupButtons()
+
+        lifecycleScope.launch {
+            val config = withContext(Dispatchers.IO) { loadConfigFromAssets() } ?: return@launch
+            applyConfigToUi(config)
+        }
 
         // 日志区触摸时阻止外层 NestedScrollView 拦截，使内层可独立滚动
         scrollLog.setOnTouchListener { v, _ ->
@@ -243,22 +259,15 @@ class MainActivity : AppCompatActivity() {
         useHwEncoder = switchHwEncoder.isChecked
         val preset = actvPreset.text.toString()
         val crf = sliderCrf.value.toInt()
-        val subtitleMode = when (rgSubtitleMode.checkedRadioButtonId) {
-            R.id.rbHardSub -> SubtitleMode.HARD
-            R.id.rbSoftSub -> SubtitleMode.SOFT
-            else -> SubtitleMode.NONE
-        }
-        val motionMode = when (rgMotionMode.checkedRadioButtonId) {
-            R.id.rbMotionSubtle -> MotionMode.SUBTLE
-            R.id.rbMotionDramatic -> MotionMode.DRAMATIC
-            else -> MotionMode.NONE
-        }
 
         lifecycleScope.launch {
             try {
                 val prepareStart = System.currentTimeMillis()
                 val files = prepareAssets()
                 val segCount = files.segmentTexts.size
+                val subtitleMode = resolveSubtitleMode(files.config)
+                val motionMode = resolveMotionMode(files.config)
+                applyConfigToUi(files.config)
                 appendLog("资源准备完成 (${formatDuration(System.currentTimeMillis() - prepareStart)}), 片段: $segCount")
 
                 runFFmpeg(files, preset, crf, subtitleMode, motionMode)
@@ -331,17 +340,57 @@ class MainActivity : AppCompatActivity() {
         val sub = obj.optJSONObject("subtitle")
         val music = obj.optJSONObject("music")
         return SynthesisConfig(
+            taskId = obj.optString("task_id", ""),
+            audioSpeed = obj.optDouble("audio_speed", DEFAULT_AUDIO_SPEED),
             fps = obj.optInt("fps", DEFAULT_FPS),
             enableMotion = obj.optBoolean("enable_motion", true),
-            motionIntensity = obj.optString("motion_intensity", "medium"),
+            motionIntensity = obj.optString("motion_intensity", "medium").trim().lowercase(Locale.ROOT),
             subtitleEnabled = sub?.optBoolean("enabled", true) ?: true,
+            subtitleMode = sub?.optString("mode", DEFAULT_SUBTITLE_MODE)?.trim()?.lowercase(Locale.ROOT)
+                ?: DEFAULT_SUBTITLE_MODE,
             subtitleFontSize = sub?.optInt("font_size", DEFAULT_SUBTITLE_FONT_SIZE) ?: DEFAULT_SUBTITLE_FONT_SIZE,
             subtitleMarginV = sub?.optInt("margin_v", DEFAULT_SUBTITLE_MARGIN_V) ?: DEFAULT_SUBTITLE_MARGIN_V,
             subtitleOutline = sub?.optInt("outline", DEFAULT_SUBTITLE_OUTLINE) ?: DEFAULT_SUBTITLE_OUTLINE,
+            subtitleFontColor = sub?.optString("font_color", DEFAULT_SUBTITLE_FONT_COLOR) ?: DEFAULT_SUBTITLE_FONT_COLOR,
+            subtitleOutlineColor = sub?.optString("outline_color", DEFAULT_SUBTITLE_OUTLINE_COLOR) ?: DEFAULT_SUBTITLE_OUTLINE_COLOR,
             maxCharsPerLine = sub?.optInt("max_chars_per_line", DEFAULT_MAX_CHARS_PER_LINE) ?: DEFAULT_MAX_CHARS_PER_LINE,
             bgmVolume = music?.optDouble("volume", DEFAULT_BGM_VOLUME) ?: DEFAULT_BGM_VOLUME,
             bgmFadeOutSec = music?.optDouble("fade_out_sec", DEFAULT_BGM_FADEOUT_SEC) ?: DEFAULT_BGM_FADEOUT_SEC,
         )
+    }
+
+    private fun loadConfigFromAssets(): SynthesisConfig? {
+        return runCatching {
+            parseConfig(assets.open("config.json").bufferedReader().use { it.readText() })
+        }.getOrNull()
+    }
+
+    private fun applyConfigToUi(config: SynthesisConfig) {
+        rgSubtitleMode.check(
+            when (resolveSubtitleMode(config)) {
+                SubtitleMode.HARD -> R.id.rbHardSub
+                SubtitleMode.SOFT -> R.id.rbSoftSub
+                SubtitleMode.NONE -> R.id.rbNoSub
+            }
+        )
+        rgMotionMode.check(
+            when (resolveMotionMode(config)) {
+                MotionMode.NONE -> R.id.rbMotionNone
+                MotionMode.SUBTLE -> R.id.rbMotionSubtle
+                MotionMode.MEDIUM -> R.id.rbMotionMedium
+                MotionMode.DRAMATIC -> R.id.rbMotionDramatic
+            }
+        )
+    }
+
+    private fun resolveSubtitleMode(config: SynthesisConfig): SubtitleMode {
+        if (!config.subtitleEnabled) return SubtitleMode.NONE
+        return SubtitleMode.fromConfigValue(config.subtitleMode)
+    }
+
+    private fun resolveMotionMode(config: SynthesisConfig): MotionMode {
+        if (!config.enableMotion) return MotionMode.NONE
+        return MotionMode.fromConfigValue(config.motionIntensity)
     }
 
     private fun copyAsset(assetName: String, destDir: File): File {
@@ -426,7 +475,13 @@ class MainActivity : AppCompatActivity() {
         // ── [V4+ Styles] ──
         sb.appendLine("[V4+ Styles]")
         sb.appendLine("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding")
-        sb.appendLine("Style: Default,$DEFAULT_SUBTITLE_FONT_NAME,${config.subtitleFontSize},&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,${config.subtitleOutline},$SUBTITLE_SHADOW,2,10,10,${config.subtitleMarginV},1")
+        sb.appendLine(
+            "Style: Default,$DEFAULT_SUBTITLE_FONT_NAME,${config.subtitleFontSize}," +
+                "${toAssColor(config.subtitleFontColor, DEFAULT_SUBTITLE_FONT_COLOR)}," +
+                "&H000000FF," +
+                "${toAssColor(config.subtitleOutlineColor, DEFAULT_SUBTITLE_OUTLINE_COLOR)}," +
+                "&H00000000,0,0,0,0,100,100,0,0,1,${config.subtitleOutline},$SUBTITLE_SHADOW,2,10,10,${config.subtitleMarginV},1"
+        )
         sb.appendLine()
 
         // ── [Events] ──
@@ -457,6 +512,38 @@ class MainActivity : AppCompatActivity() {
             .replace("}", "\\}")
             .replace("\r\n", "\\N")
             .replace("\n", "\\N")
+    }
+
+    private fun toAssColor(rawColor: String, fallbackColor: String): String {
+        val colorInt = parseAndroidColor(rawColor) ?: parseAndroidColor(fallbackColor) ?: Color.WHITE
+        val alpha = Color.alpha(colorInt)
+        val red = Color.red(colorInt)
+        val green = Color.green(colorInt)
+        val blue = Color.blue(colorInt)
+        return "&H%02X%02X%02X%02X".format(255 - alpha, blue, green, red)
+    }
+
+    private fun parseAndroidColor(value: String?): Int? {
+        val normalized = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        return runCatching { normalized.toColorInt() }.getOrNull()
+    }
+
+    private fun buildAtempoFilter(speed: Double): String {
+        val sanitized = if (speed.isFinite() && speed > 0.0) speed else DEFAULT_AUDIO_SPEED
+        val filters = mutableListOf<String>()
+        var remaining = sanitized
+
+        while (remaining < 0.5) {
+            filters.add("atempo=0.5")
+            remaining /= 0.5
+        }
+        while (remaining > 2.0) {
+            filters.add("atempo=2.0")
+            remaining /= 2.0
+        }
+
+        filters.add("atempo=%.3f".format(Locale.US, remaining))
+        return filters.joinToString(",")
     }
 
     /**
@@ -551,6 +638,7 @@ class MainActivity : AppCompatActivity() {
     ): Triple<String, String, Int> {
         val zoomRange = when (mode) {
             MotionMode.SUBTLE -> 0.10
+            MotionMode.MEDIUM -> 0.15
             MotionMode.DRAMATIC -> 0.20
             else -> 0.0
         }
@@ -637,12 +725,21 @@ class MainActivity : AppCompatActivity() {
         val segmentTimes = mutableListOf<Long>()
         var concatTime: Long
         var subtitleTime: Long
+        val segmentAudioFilter = buildAtempoFilter(config.audioSpeed)
 
         val encoderName = if (useHwEncoder) "h264_mediacodec (硬编码)" else "libx264 (软编码)"
         if (useHwEncoder) {
-            appendLog("编码器: $encoderName | 码率=$HW_ENCODER_BITRATE, 字幕=${subtitleMode.label}, 动效=${motionMode.label}")
+            appendLog(
+                "任务: ${config.taskId.ifEmpty { "-" }} | 编码器: $encoderName | " +
+                    "码率=$HW_ENCODER_BITRATE, 语速=${"%.2f".format(config.audioSpeed)}x, " +
+                    "字幕=${subtitleMode.label}, 动效=${motionMode.label}"
+            )
         } else {
-            appendLog("编码器: $encoderName | preset=$preset, crf=$crf, 字幕=${subtitleMode.label}, 动效=${motionMode.label}")
+            appendLog(
+                "任务: ${config.taskId.ifEmpty { "-" }} | 编码器: $encoderName | " +
+                    "preset=$preset, crf=$crf, 语速=${"%.2f".format(config.audioSpeed)}x, " +
+                    "字幕=${subtitleMode.label}, 动效=${motionMode.label}"
+            )
         }
 
         // ── Step 1: 逐片段生成视频 ──
@@ -678,6 +775,7 @@ class MainActivity : AppCompatActivity() {
                 append("-i \"$imagePath\" ")
                 append("-i \"$audioPath\" ")
                 if (motionFilter != null) append("-vf \"$motionFilter\" ")
+                append("-filter:a \"$segmentAudioFilter\" ")
                 if (useHwEncoder) {
                     append("-c:v h264_mediacodec -b:v $HW_ENCODER_BITRATE ")
                 } else {
@@ -913,6 +1011,9 @@ class MainActivity : AppCompatActivity() {
             appendLine("总耗时: ${formatDuration(durationMs)}")
             appendLine("耗时(秒): %.2f".format(durationMs / 1000.0))
             appendLine()
+            appendLine("任务ID: ${files.config.taskId.ifEmpty { "-" }}")
+            appendLine("音频语速: %.2fx".format(files.config.audioSpeed))
+            appendLine()
             appendLine("--- 耗时分布 ---")
             appendLine("片段编码: ${formatDuration(segTotal)} (${pct(segTotal, durationMs)})")
             appendLine("  平均每片: ${formatDuration(segAvg)}")
@@ -1020,12 +1121,32 @@ class MainActivity : AppCompatActivity() {
     enum class SubtitleMode(val label: String) {
         HARD("硬字幕(烧录)"),
         SOFT("软字幕(封装)"),
-        NONE("无字幕")
+        NONE("无字幕");
+
+        companion object {
+            fun fromConfigValue(value: String): SubtitleMode = when (value) {
+                "hard" -> HARD
+                "soft" -> SOFT
+                "none" -> NONE
+                else -> HARD
+            }
+        }
     }
 
     enum class MotionMode(val label: String) {
         NONE("无动效"),
+        MEDIUM("中等"),
         SUBTLE("轻微"),
-        DRAMATIC("明显")
+        DRAMATIC("明显");
+
+        companion object {
+            fun fromConfigValue(value: String): MotionMode = when (value) {
+                "none" -> NONE
+                "subtle" -> SUBTLE
+                "medium" -> MEDIUM
+                "dramatic" -> DRAMATIC
+                else -> MEDIUM
+            }
+        }
     }
 }

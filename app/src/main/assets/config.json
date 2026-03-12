@@ -1,17 +1,18 @@
 {
   "task_id": "1fb09ceb-3737-4cdb-82e2-95c31bcbd63e",
   "audio_speed": 1.0,
+  "fps": 30,
   "enable_motion": true,
   "motion_intensity": "medium",
-  "fps": 30,
   "subtitle": {
-    "margin_v": 100,
-    "font_color": "white",
-    "font_size": 36,
-    "split_long_text": true,
-    "max_chars_per_line": 15,
     "enabled": true,
-    "outline_color": "black"
+    "mode": "hard",
+    "font_size": 48,
+    "margin_v": 60,
+    "outline": 1,
+    "font_color": "#FFFFFFFF",
+    "outline_color": "#FFFF3B30",
+    "max_chars_per_line": 12
   },
   "music": {
     "volume": 0.2,

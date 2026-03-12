@@ -230,8 +230,16 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:checked="true"
                         android:text="@string/motion_subtle"
+                        android:textSize="13sp" />
+
+                    <RadioButton
+                        android:id="@+id/rbMotionMedium"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:checked="true"
+                        android:text="@string/motion_medium"
                         android:textSize="13sp" />
 
                     <RadioButton

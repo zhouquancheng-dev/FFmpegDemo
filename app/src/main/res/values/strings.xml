@@ -24,6 +24,7 @@
     <string name="label_motion_mode">图片动效:</string>
     <string name="motion_none">无动效</string>
     <string name="motion_subtle">轻微</string>
+    <string name="motion_medium">中等</string>
     <string name="motion_dramatic">明显</string>
 
     <!-- 按钮 -->
