@@ -7,7 +7,7 @@
   "subtitle": {
     "enabled": true,
     "mode": "hard",
-    "font_size": 48,
+    "font_size": 28,
     "margin_v": 60,
     "outline": 1,
     "font_color": "#FFFFFFFF",

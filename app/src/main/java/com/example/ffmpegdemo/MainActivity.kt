@@ -3,6 +3,7 @@ package com.example.ffmpegdemo
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.graphics.Color
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -17,14 +18,15 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import com.arthenica.ffmpegkit.FFmpegKit
-import com.arthenica.ffmpegkit.FFprobeKit
 import com.arthenica.ffmpegkit.ReturnCode
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.materialswitch.MaterialSwitch
 import com.google.android.material.progressindicator.LinearProgressIndicator
 import com.google.android.material.slider.Slider
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -34,8 +36,9 @@ import java.io.File
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.*
-import kotlin.coroutines.resume
 import androidx.core.graphics.toColorInt
+import kotlin.coroutines.resume
+import kotlin.math.roundToLong
 
 class MainActivity : AppCompatActivity() {
 
@@ -93,6 +96,7 @@ class MainActivity : AppCompatActivity() {
     private var useHwEncoder = false
     private var pendingScroll = false
     private var outputFile: File? = null
+    private var synthesisJob: Job? = null
 
     private val presets = arrayOf(
         "ultrafast", "superfast", "veryfast", "faster",
@@ -100,6 +104,16 @@ class MainActivity : AppCompatActivity() {
     )
 
     private data class MotionTemplate(val name: String, val filter: String)
+
+    private data class SegmentAsset(
+        val index: Int,
+        val text: String,
+        val imageFile: File,
+        val audioFile: File,
+        val imageWidth: Int,
+        val imageHeight: Int,
+        val adjustedDurationMs: Long
+    )
 
     data class SynthesisConfig(
         val taskId: String = "",
@@ -119,14 +133,26 @@ class MainActivity : AppCompatActivity() {
         val bgmFadeOutSec: Double = DEFAULT_BGM_FADEOUT_SEC,
     )
 
-    data class WorkFiles(
+    private data class WorkFiles(
         val workDir: File,
-        val segmentTexts: List<String>,
+        val segments: List<SegmentAsset>,
         val fontFile: File,
         val bgmFile: File,
         val finalOutput: File,
         val config: SynthesisConfig = SynthesisConfig()
-    )
+    ) {
+        val segmentTexts: List<String>
+            get() = segments.map { it.text }
+
+        val totalDurationMs: Long
+            get() = segments.sumOf { it.adjustedDurationMs }
+
+        val videoWidth: Int
+            get() = segments.firstOrNull()?.imageWidth ?: 1280
+
+        val videoHeight: Int
+            get() = segments.firstOrNull()?.imageHeight ?: 720
+    }
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -259,31 +285,33 @@ class MainActivity : AppCompatActivity() {
         useHwEncoder = switchHwEncoder.isChecked
         val preset = actvPreset.text.toString()
         val crf = sliderCrf.value.toInt()
+        val subtitleMode = selectedSubtitleMode()
+        val motionMode = selectedMotionMode()
 
-        lifecycleScope.launch {
+        synthesisJob = lifecycleScope.launch {
             try {
                 val prepareStart = System.currentTimeMillis()
                 val files = prepareAssets()
-                val segCount = files.segmentTexts.size
-                val subtitleMode = resolveSubtitleMode(files.config)
-                val motionMode = resolveMotionMode(files.config)
-                applyConfigToUi(files.config)
+                val segCount = files.segments.size
                 appendLog("资源准备完成 (${formatDuration(System.currentTimeMillis() - prepareStart)}), 片段: $segCount")
 
                 runFFmpeg(files, preset, crf, subtitleMode, motionMode)
+            } catch (_: CancellationException) {
+                Log.i(TAG, "合成任务已取消")
             } catch (e: Exception) {
                 Log.e(TAG, "合成异常", e)
                 appendLog("错误: ${e.message}")
                 runOnUiThread { onSynthesisFinished(false, "") }
+            } finally {
+                synthesisJob = null
             }
         }
     }
 
     private fun cancelSynthesis() {
-        if (currentSessionId != -1L) {
-            FFmpegKit.cancel(currentSessionId)
-            appendLog("=== 用户取消 ===")
-        }
+        synthesisJob?.cancel(CancellationException("User cancelled synthesis"))
+        if (currentSessionId != -1L) FFmpegKit.cancel(currentSessionId)
+        appendLog("=== 用户取消 ===")
         runOnUiThread { onSynthesisFinished(false, getString(R.string.status_cancelled)) }
     }
 
@@ -295,7 +323,7 @@ class MainActivity : AppCompatActivity() {
         workDir.listFiles()?.forEach { f ->
             if (f.isFile && (f.name.startsWith("segment_")
                         || f.name == "concatenated.mp4" || f.name == "concat_list.txt"
-                        || f.name == "subtitles.srt")) {
+                        || f.name == "subtitles.srt" || f.name == "subtitles.ass")) {
                 f.delete()
             }
         }
@@ -308,19 +336,32 @@ class MainActivity : AppCompatActivity() {
         // 从 segments.json 读取片段信息，动态确定片段数
         val jsonStr = assets.open("segments.json").bufferedReader().use { it.readText() }
         val jsonArray = JSONArray(jsonStr)
-        val segmentTexts = mutableListOf<String>()
+        val segments = mutableListOf<SegmentAsset>()
+        val normalizedSpeed = sanitizeAudioSpeed(config.audioSpeed)
         for (i in 0 until jsonArray.length()) {
             val raw = jsonArray.getJSONObject(i).getString("text")
-            segmentTexts.add(raw.replace(Regex("^=+\\s*\\n\\n"), ""))
-        }
-
-        // 复制各片段的素材到工作目录
-        for (i in 1..segmentTexts.size) {
-            val segDir = File(workDir, "seg_$i")
+            val text = raw.replace(Regex("^=+\\s*\\n\\n"), "")
+            val index = i + 1
+            val segDir = File(workDir, "seg_$index")
             segDir.mkdirs()
-            val assetDir = "seg_%02d".format(i)
-            copyAsset("$assetDir/image.png", segDir)
-            copyAsset("$assetDir/audio.wav", segDir)
+            val assetDir = "seg_%02d".format(index)
+            val imageFile = copyAsset("%s/image.png".format(assetDir), segDir)
+            val audioFile = copyAsset("%s/audio.wav".format(assetDir), segDir)
+            val imageSize = getImageSize(imageFile)
+            val sourceAudioDurationMs = getMediaDurationMs(audioFile) ?: FALLBACK_DURATION_MS
+            val adjustedDurationMs = (sourceAudioDurationMs / normalizedSpeed).roundToLong()
+                .coerceAtLeast(1L)
+            segments.add(
+                SegmentAsset(
+                    index = index,
+                    text = text,
+                    imageFile = imageFile,
+                    audioFile = audioFile,
+                    imageWidth = imageSize.first,
+                    imageHeight = imageSize.second,
+                    adjustedDurationMs = adjustedDurationMs
+                )
+            )
         }
 
         // 复制字体到工作目录（libass 需要文件系统路径，无法直接读取 APK 内资源）
@@ -332,7 +373,7 @@ class MainActivity : AppCompatActivity() {
         if (!bgmFile.exists()) copyAsset(BGM_ASSET, workDir)
 
         val finalOutput = File(workDir, "output.mp4")
-        WorkFiles(workDir, segmentTexts, fontFile, bgmFile, finalOutput, config)
+        WorkFiles(workDir, segments, fontFile, bgmFile, finalOutput, config)
     }
 
     private fun parseConfig(jsonStr: String): SynthesisConfig {
@@ -383,6 +424,19 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    private fun selectedSubtitleMode(): SubtitleMode = when (rgSubtitleMode.checkedRadioButtonId) {
+        R.id.rbSoftSub -> SubtitleMode.SOFT
+        R.id.rbNoSub -> SubtitleMode.NONE
+        else -> SubtitleMode.HARD
+    }
+
+    private fun selectedMotionMode(): MotionMode = when (rgMotionMode.checkedRadioButtonId) {
+        R.id.rbMotionNone -> MotionMode.NONE
+        R.id.rbMotionSubtle -> MotionMode.SUBTLE
+        R.id.rbMotionDramatic -> MotionMode.DRAMATIC
+        else -> MotionMode.MEDIUM
+    }
+
     private fun resolveSubtitleMode(config: SynthesisConfig): SubtitleMode {
         if (!config.subtitleEnabled) return SubtitleMode.NONE
         return SubtitleMode.fromConfigValue(config.subtitleMode)
@@ -409,17 +463,18 @@ class MainActivity : AppCompatActivity() {
      * 收集各片段的字幕时间轴：List<Triple<startMs, endMs, text>>
      */
     private fun collectSubtitleEvents(
-        workDir: File, segmentTexts: List<String>, maxChars: Int
+        segments: List<SegmentAsset>,
+        maxChars: Int
     ): List<Triple<Long, Long, String>> {
         val events = mutableListOf<Triple<Long, Long, String>>()
         var offsetMs = 0L
-        for (i in 1..segmentTexts.size) {
-            val durationMs = (getMediaDurationSec(File(workDir, "segment_$i.mp4"))?.times(1000))?.toLong() ?: -1
+        for (segment in segments) {
+            val durationMs = segment.adjustedDurationMs
             if (durationMs <= 0) {
                 offsetMs += FALLBACK_DURATION_MS
                 continue
             }
-            val sentences = splitBySentence(segmentTexts[i - 1], maxChars)
+            val sentences = splitBySentence(segment.text, maxChars)
             val totalChars = sentences.sumOf { it.length }.coerceAtLeast(1)
             for (sentence in sentences) {
                 val sentenceMs = (durationMs * sentence.length / totalChars.toDouble()).toLong()
@@ -432,10 +487,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** 生成 SRT 字幕文件（用于软字幕 / 无字幕模式） */
-    private fun generateSrtFromSegments(workDir: File, segmentTexts: List<String>, config: SynthesisConfig): File {
+    private fun generateSrtFromSegments(files: WorkFiles, config: SynthesisConfig): File {
         val maxChars = if (config.maxCharsPerLine > 0) config.maxCharsPerLine
-            else calcMaxCharsPerLine(File(workDir, "segment_1.mp4"))
-        val events = collectSubtitleEvents(workDir, segmentTexts, maxChars)
+            else calcMaxCharsPerLine(files.videoWidth, config.subtitleFontSize)
+        val events = collectSubtitleEvents(files.segments, maxChars)
 
         val sb = StringBuilder()
         events.forEachIndexed { idx, (startMs, endMs, text) ->
@@ -444,7 +499,7 @@ class MainActivity : AppCompatActivity() {
             sb.appendLine(text)
             sb.appendLine()
         }
-        val srtFile = File(workDir, "subtitles.srt")
+        val srtFile = File(files.workDir, "subtitles.srt")
         srtFile.writeText(sb.toString())
         return srtFile
     }
@@ -454,15 +509,14 @@ class MainActivity : AppCompatActivity() {
      * PlayResY 写入 [Script Info]，FontSize / MarginV 等值直接以像素为单位
      */
     private fun generateAssFromSegments(
-        workDir: File,
-        segmentTexts: List<String>,
+        files: WorkFiles,
         config: SynthesisConfig,
         videoWidth: Int,
         videoHeight: Int
     ): File {
         val maxChars = if (config.maxCharsPerLine > 0) config.maxCharsPerLine
-            else calcMaxCharsPerLine(File(workDir, "segment_1.mp4"))
-        val events = collectSubtitleEvents(workDir, segmentTexts, maxChars)
+            else calcMaxCharsPerLine(videoWidth, config.subtitleFontSize)
+        val events = collectSubtitleEvents(files.segments, maxChars)
 
         val sb = StringBuilder()
         // ── [Script Info] ──
@@ -491,7 +545,7 @@ class MainActivity : AppCompatActivity() {
             sb.appendLine("Dialogue: 0,${formatAssTime(startMs)},${formatAssTime(endMs)},Default,,0,0,0,,${escapeAssText(text)}")
         }
 
-        val assFile = File(workDir, "subtitles.ass")
+        val assFile = File(files.workDir, "subtitles.ass")
         assFile.writeText(sb.toString())
         return assFile
     }
@@ -528,8 +582,12 @@ class MainActivity : AppCompatActivity() {
         return runCatching { normalized.toColorInt() }.getOrNull()
     }
 
+    private fun sanitizeAudioSpeed(speed: Double): Double {
+        return if (speed.isFinite() && speed > 0.0) speed else DEFAULT_AUDIO_SPEED
+    }
+
     private fun buildAtempoFilter(speed: Double): String {
-        val sanitized = if (speed.isFinite() && speed > 0.0) speed else DEFAULT_AUDIO_SPEED
+        val sanitized = sanitizeAudioSpeed(speed)
         val filters = mutableListOf<String>()
         var remaining = sanitized
 
@@ -595,25 +653,23 @@ class MainActivity : AppCompatActivity() {
      * 根据视频尺寸和字幕 FontSize 计算每行最大字符数
      * 使用 PlayResY=视频高度 的像素坐标，中文字符近似等宽（宽≈高）
      */
-    private fun calcMaxCharsPerLine(videoFile: File, fontSize: Int = DEFAULT_SUBTITLE_FONT_SIZE): Int {
-        val info = FFprobeKit.getMediaInformation(videoFile.absolutePath).mediaInformation
-        if (info != null) {
-            val stream = info.streams?.firstOrNull { it.width != null && it.height != null }
-            if (stream != null) {
-                val videoWidth = stream.width.toDouble()
-                // PlayResY=视频高度时，fontSize 直接就是像素值
-                val usableWidth = videoWidth * SUBTITLE_USABLE_WIDTH
-                val calculated = (usableWidth / fontSize).toInt()
-                if (calculated > 0) return calculated
-            }
-        }
-        return 20
+    private fun calcMaxCharsPerLine(videoWidth: Int, fontSize: Int = DEFAULT_SUBTITLE_FONT_SIZE): Int {
+        val usableWidth = videoWidth * SUBTITLE_USABLE_WIDTH
+        val safeFontSize = fontSize.coerceAtLeast(1)
+        return (usableWidth / safeFontSize).toInt().coerceAtLeast(1)
     }
 
-    /** 返回媒体时长（秒），探测失败返回 null */
-    private fun getMediaDurationSec(file: File): Double? {
-        val info = FFprobeKit.getMediaInformation(file.absolutePath).mediaInformation ?: return null
-        return info.duration.toDoubleOrNull()
+    /** 返回媒体时长（毫秒），探测失败返回 null */
+    private fun getMediaDurationMs(file: File): Long? {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(file.absolutePath)
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
+        } catch (_: Exception) {
+            null
+        } finally {
+            runCatching { retriever.release() }
+        }
     }
 
     private fun getImageSize(file: File): Pair<Int, Int> {
@@ -687,23 +743,76 @@ class MainActivity : AppCompatActivity() {
         return output.contains("h264_mediacodec")
     }
 
-    private suspend fun executeFFmpegCommand(cmd: String): Boolean =
-        suspendCancellableCoroutine { cont ->
-            val session = FFmpegKit.executeAsync(cmd,
-                { s -> if (cont.isActive) cont.resume(ReturnCode.isSuccess(s.returnCode)) },
-                { /* log - 不转发到 UI */ },
-                { /* statistics */ }
-            )
-            currentSessionId = session.sessionId
-            cont.invokeOnCancellation { FFmpegKit.cancel(session.sessionId) }
-        }
+    private data class ExecutionResult(
+        val success: Boolean,
+        val cancelled: Boolean,
+        val lastLogLine: String? = null
+    )
 
-    private suspend fun executeFFmpegArgs(args: Array<String>): Boolean =
+    private fun formatSeconds(seconds: Double): String = "%.2fs".format(Locale.US, seconds)
+
+    private fun buildBgmAudioFilter(config: SynthesisConfig, videoDurationMs: Long): String {
+        val durationSec = (videoDurationMs / 1000.0).coerceAtLeast(0.0)
+        val fadeDurationSec = config.bgmFadeOutSec.coerceAtLeast(0.0).coerceAtMost(durationSec)
+        val bgmChain = mutableListOf(
+            "[1:a]volume=%.3f".format(Locale.US, config.bgmVolume),
+            "atrim=duration=%s".format(formatSeconds(durationSec))
+        )
+        if (fadeDurationSec > 0.0) {
+            val fadeStartSec = (durationSec - fadeDurationSec).coerceAtLeast(0.0)
+            bgmChain.add(
+                "afade=t=out:st=%s:d=%s".format(
+                    formatSeconds(fadeStartSec),
+                    formatSeconds(fadeDurationSec)
+                )
+            )
+        }
+        return "%s[bgm];[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=0[aout]"
+            .format(bgmChain.joinToString(","))
+    }
+
+    private suspend fun executeFFmpegArgs(
+        args: Array<String>,
+        stageLabel: String,
+        expectedDurationMs: Long? = null
+    ): ExecutionResult =
         suspendCancellableCoroutine { cont ->
+            var lastLogLine: String? = null
+            var lastStatsSecond = -1L
             val session = FFmpegKit.executeWithArgumentsAsync(args,
-                { s -> if (cont.isActive) cont.resume(ReturnCode.isSuccess(s.returnCode)) },
-                { /* log - 不转发到 UI */ },
-                { /* statistics */ }
+                { s ->
+                    if (cont.isActive) {
+                        cont.resume(
+                            ExecutionResult(
+                                success = ReturnCode.isSuccess(s.returnCode),
+                                cancelled = ReturnCode.isCancel(s.returnCode),
+                                lastLogLine = lastLogLine
+                            )
+                        )
+                    }
+                },
+                { log ->
+                    val message = log.message?.trim().orEmpty()
+                    if (message.isNotEmpty()) lastLogLine = message
+                },
+                { statistics ->
+                    if (expectedDurationMs != null && expectedDurationMs > 0L) {
+                        val currentSecond = statistics.time.toLong() / 1000L
+                        if (currentSecond > lastStatsSecond && currentSecond % 2L == 0L) {
+                            lastStatsSecond = currentSecond
+                            val encodedMs = statistics.time.toLong().coerceAtLeast(0L)
+                            val pct = (encodedMs * 100L / expectedDurationMs).coerceIn(0L, 99L)
+                            appendLog(
+                                "%s 进度 %d%% (%s/%s)".format(
+                                    stageLabel,
+                                    pct,
+                                    formatSeconds(encodedMs / 1000.0),
+                                    formatSeconds(expectedDurationMs / 1000.0)
+                                )
+                            )
+                        }
+                    }
+                }
             )
             currentSessionId = session.sessionId
             cont.invokeOnCancellation { FFmpegKit.cancel(session.sessionId) }
@@ -718,7 +827,7 @@ class MainActivity : AppCompatActivity() {
     ) {
         val startTime = System.currentTimeMillis()
         val workDir = files.workDir
-        val segCount = files.segmentTexts.size
+        val segCount = files.segments.size
         val totalSteps = segCount + 2
 
         val config = files.config
@@ -726,6 +835,7 @@ class MainActivity : AppCompatActivity() {
         var concatTime: Long
         var subtitleTime: Long
         val segmentAudioFilter = buildAtempoFilter(config.audioSpeed)
+        val videoDurationMs = files.totalDurationMs
 
         val encoderName = if (useHwEncoder) "h264_mediacodec (硬编码)" else "libx264 (软编码)"
         if (useHwEncoder) {
@@ -745,61 +855,73 @@ class MainActivity : AppCompatActivity() {
         // ── Step 1: 逐片段生成视频 ──
         appendLog("\n▶ 第一步: 生成各片段视频")
         var lastMotionIndex = -1  // 用于相邻不重复
-        for (i in 1..segCount) {
-            updateProgress(i, totalSteps, "生成片段 $i/$segCount")
+        for ((ordinal, segment) in files.segments.withIndex()) {
+            val stepIndex = ordinal + 1
+            updateProgress(stepIndex, totalSteps, "生成片段 %d/%d".format(stepIndex, segCount))
 
-            val segDir = File(workDir, "seg_$i")
-            val imagePath = File(segDir, "image.png").absolutePath
-            val audioPath = File(segDir, "audio.wav").absolutePath
-            val segOutputFile = File(workDir, "segment_$i.mp4")
+            val segOutputFile = File(workDir, "segment_%d.mp4".format(segment.index))
 
             // 有动效时，先探测音频时长和图片尺寸，生成滤镜
             var motionFilter: String? = null
             if (motionMode != MotionMode.NONE) {
-                val imageFile = File(segDir, "image.png")
-                val audioDurationSec = withContext(Dispatchers.IO) {
-                    getMediaDurationSec(File(segDir, "audio.wav")) ?: 3.0
-                }
-                val imgSize = withContext(Dispatchers.IO) { getImageSize(imageFile) }
                 val result = getRandomMotionEffect(
-                    audioDurationSec, motionMode, lastMotionIndex,
-                    imgSize.first, imgSize.second, config.fps
+                    segment.adjustedDurationMs / 1000.0,
+                    motionMode,
+                    lastMotionIndex,
+                    segment.imageWidth,
+                    segment.imageHeight,
+                    config.fps
                 )
                 lastMotionIndex = result.third
                 motionFilter = result.first
-                appendLog("    动效: ${result.second}")
+                appendLog("    动效: %s".format(result.second))
             }
 
-            val cmd = buildString {
-                append("-loop 1 ")
-                append("-i \"$imagePath\" ")
-                append("-i \"$audioPath\" ")
-                if (motionFilter != null) append("-vf \"$motionFilter\" ")
-                append("-filter:a \"$segmentAudioFilter\" ")
+            val args = mutableListOf<String>().apply {
+                addAll(listOf("-loop", "1", "-framerate", config.fps.toString()))
+                addAll(listOf("-i", segment.imageFile.absolutePath))
+                addAll(listOf("-i", segment.audioFile.absolutePath))
+                if (motionFilter != null) addAll(listOf("-vf", motionFilter))
+                addAll(listOf("-filter:a", segmentAudioFilter))
                 if (useHwEncoder) {
-                    append("-c:v h264_mediacodec -b:v $HW_ENCODER_BITRATE ")
+                    addAll(listOf("-c:v", "h264_mediacodec", "-b:v", HW_ENCODER_BITRATE))
                 } else {
-                    append("-c:v libx264 ")
-                    if (motionFilter == null) append("-tune stillimage ")
-                    append("-preset $preset -crf $crf ")
+                    addAll(listOf("-c:v", "libx264"))
+                    if (motionFilter == null) addAll(listOf("-tune", "stillimage"))
+                    addAll(listOf("-preset", preset, "-crf", crf.toString()))
                 }
-                append("-c:a aac -b:a $AUDIO_BITRATE ")
-                append("-pix_fmt yuv420p ")
-                append("-shortest ")
-                append("-y \"${segOutputFile.absolutePath}\"")
+                addAll(
+                    listOf(
+                        "-c:a", "aac",
+                        "-b:a", AUDIO_BITRATE,
+                        "-pix_fmt", "yuv420p",
+                        "-r", config.fps.toString(),
+                        "-shortest",
+                        "-y", segOutputFile.absolutePath
+                    )
+                )
             }
 
             val segStart = System.currentTimeMillis()
-            val ok = withContext(Dispatchers.IO) { executeFFmpegCommand(cmd) }
+            val result = withContext(Dispatchers.IO) {
+                executeFFmpegArgs(
+                    args = args.toTypedArray(),
+                    stageLabel = "片段 %d".format(segment.index),
+                    expectedDurationMs = segment.adjustedDurationMs
+                )
+            }
             val segCost = System.currentTimeMillis() - segStart
             segmentTimes.add(segCost)
 
-            if (!ok || !segOutputFile.exists() || segOutputFile.length() == 0L) {
-                appendLog("  ✗ 片段 $i 编码失败")
-                runOnUiThread { onSynthesisFinished(false, "片段 $i 编码失败") }
+            if (result.cancelled) throw CancellationException("片段编码已取消")
+
+            if (!result.success || !segOutputFile.exists() || segOutputFile.length() == 0L) {
+                appendLog("  ✗ 片段 %d 编码失败".format(segment.index))
+                result.lastLogLine?.let { appendLog("    FFmpeg: %s".format(it)) }
+                runOnUiThread { onSynthesisFinished(false, "片段 %d 编码失败".format(segment.index)) }
                 return
             }
-            appendLog("  $i/$segCount  ${formatDuration(segCost)}  ${formatSize(segOutputFile.length())}")
+            appendLog("  %d/%d  %s  %s".format(stepIndex, segCount, formatDuration(segCost), formatSize(segOutputFile.length())))
         }
 
         // 字幕文件在拼接后、根据字幕模式选择格式生成
@@ -812,25 +934,31 @@ class MainActivity : AppCompatActivity() {
 
         val concatListFile = File(workDir, "concat_list.txt")
         concatListFile.writeText(buildString {
-            for (i in 1..segCount) {
-                appendLine("file '${File(workDir, "segment_$i.mp4").absolutePath}'")
+            for (segment in files.segments) {
+                appendLine("file '${File(workDir, "segment_%d.mp4".format(segment.index)).absolutePath}'")
             }
         })
 
         val concatenatedFile = File(workDir, "concatenated.mp4")
-        val concatCmd = buildString {
-            append("-f concat -safe 0 ")
-            append("-i \"${concatListFile.absolutePath}\" ")
-            append("-c copy ")
-            append("-y \"${concatenatedFile.absolutePath}\"")
-        }
+        val concatArgs = arrayOf(
+            "-f", "concat",
+            "-safe", "0",
+            "-i", concatListFile.absolutePath,
+            "-c", "copy",
+            "-y", concatenatedFile.absolutePath
+        )
 
         val concatStart = System.currentTimeMillis()
-        val concatOk = withContext(Dispatchers.IO) { executeFFmpegCommand(concatCmd) }
+        val concatResult = withContext(Dispatchers.IO) {
+            executeFFmpegArgs(concatArgs, stageLabel = "拼接")
+        }
         concatTime = System.currentTimeMillis() - concatStart
 
-        if (!concatOk || !concatenatedFile.exists() || concatenatedFile.length() == 0L) {
+        if (concatResult.cancelled) throw CancellationException("拼接已取消")
+
+        if (!concatResult.success || !concatenatedFile.exists() || concatenatedFile.length() == 0L) {
             appendLog("  ✗ 拼接失败")
+            concatResult.lastLogLine?.let { appendLog("    FFmpeg: %s".format(it)) }
             runOnUiThread { onSynthesisFinished(false, "拼接失败") }
             return
         }
@@ -844,29 +972,20 @@ class MainActivity : AppCompatActivity() {
         val bgmFile = files.bgmFile
         val subStart = System.currentTimeMillis()
 
-        // BGM 混音滤镜：BGM 循环播放，以视频时长为准
-        val audioFilter = "[1:a]volume=${config.bgmVolume}[bgm];[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=${config.bgmFadeOutSec}[aout]"
-
-        // 探测拼接视频高度，用于 ASS 文件的 PlayResY
-        val videoSize = withContext(Dispatchers.IO) {
-            val info = FFprobeKit.getMediaInformation(concatenatedFile.absolutePath).mediaInformation
-            val stream = info?.streams?.firstOrNull { it.width != null && it.height != null }
-            Pair(stream?.width?.toInt() ?: 1280, stream?.height?.toInt() ?: 720)
-        }
+        val audioFilter = buildBgmAudioFilter(config, videoDurationMs)
 
         // 根据字幕模式生成对应格式
         when (subtitleMode) {
             SubtitleMode.HARD -> assFile = withContext(Dispatchers.IO) {
                 generateAssFromSegments(
-                    workDir = workDir,
-                    segmentTexts = files.segmentTexts,
+                    files = files,
                     config = config,
-                    videoWidth = videoSize.first,
-                    videoHeight = videoSize.second
+                    videoWidth = files.videoWidth,
+                    videoHeight = files.videoHeight
                 )
             }
             SubtitleMode.SOFT -> srtFile = withContext(Dispatchers.IO) {
-                generateSrtFromSegments(workDir, files.segmentTexts, config)
+                generateSrtFromSegments(files, config)
             }
             SubtitleMode.NONE -> { /* 不生成字幕文件 */ }
         }
@@ -892,9 +1011,13 @@ class MainActivity : AppCompatActivity() {
                     "-c:a", "aac", "-b:a", AUDIO_BITRATE,
                     "-y", finalOutput.absolutePath
                 )
-                val ok = withContext(Dispatchers.IO) { executeFFmpegArgs(args) }
-                if (!ok || !finalOutput.exists() || finalOutput.length() == 0L) {
+                val result = withContext(Dispatchers.IO) {
+                    executeFFmpegArgs(args, stageLabel = "字幕+BGM", expectedDurationMs = videoDurationMs)
+                }
+                if (result.cancelled) throw CancellationException("硬字幕烧录已取消")
+                if (!result.success || !finalOutput.exists() || finalOutput.length() == 0L) {
                     appendLog("  ✗ 硬字幕烧录 + BGM 混音失败")
+                    result.lastLogLine?.let { appendLog("    FFmpeg: %s".format(it)) }
                     runOnUiThread { onSynthesisFinished(false, "硬字幕烧录 + BGM 混音失败") }
                     return
                 }
@@ -910,9 +1033,13 @@ class MainActivity : AppCompatActivity() {
                     "-disposition:s:0", "default",
                     "-y", finalOutput.absolutePath
                 )
-                val ok = withContext(Dispatchers.IO) { executeFFmpegArgs(args) }
-                if (!ok || !finalOutput.exists() || finalOutput.length() == 0L) {
+                val result = withContext(Dispatchers.IO) {
+                    executeFFmpegArgs(args, stageLabel = "字幕+BGM", expectedDurationMs = videoDurationMs)
+                }
+                if (result.cancelled) throw CancellationException("软字幕封装已取消")
+                if (!result.success || !finalOutput.exists() || finalOutput.length() == 0L) {
                     appendLog("  ✗ 软字幕封装 + BGM 混音失败")
+                    result.lastLogLine?.let { appendLog("    FFmpeg: %s".format(it)) }
                     runOnUiThread { onSynthesisFinished(false, "软字幕封装 + BGM 混音失败") }
                     return
                 }
@@ -926,9 +1053,13 @@ class MainActivity : AppCompatActivity() {
                     "-c:v", "copy", "-c:a", "aac", "-b:a", AUDIO_BITRATE,
                     "-y", finalOutput.absolutePath
                 )
-                val ok = withContext(Dispatchers.IO) { executeFFmpegArgs(args) }
-                if (!ok || !finalOutput.exists() || finalOutput.length() == 0L) {
+                val result = withContext(Dispatchers.IO) {
+                    executeFFmpegArgs(args, stageLabel = "BGM", expectedDurationMs = videoDurationMs)
+                }
+                if (result.cancelled) throw CancellationException("BGM 混音已取消")
+                if (!result.success || !finalOutput.exists() || finalOutput.length() == 0L) {
                     appendLog("  ✗ BGM 混音失败")
+                    result.lastLogLine?.let { appendLog("    FFmpeg: %s".format(it)) }
                     runOnUiThread { onSynthesisFinished(false, "BGM 混音失败") }
                     return
                 }
@@ -941,14 +1072,13 @@ class MainActivity : AppCompatActivity() {
         val subtitleDebugFile = assFile ?: srtFile
         if (subtitleDebugFile != null) {
             val label = if (assFile != null) "ASS" else "SRT"
-            appendLog("\n═══════════ $label 字幕内容 ═══════════")
-            appendLog(subtitleDebugFile.readText().trimEnd())
+            appendLog("\n字幕文件: %s (%s)".format(label, formatSize(subtitleDebugFile.length())))
         }
 
         // ── 清理中间文件 ──
         withContext(Dispatchers.IO) {
             try {
-                for (i in 1..segCount) File(workDir, "segment_$i.mp4").delete()
+                for (segment in files.segments) File(workDir, "segment_%d.mp4".format(segment.index)).delete()
                 concatListFile.delete()
                 concatenatedFile.delete()
                 assFile?.delete()
