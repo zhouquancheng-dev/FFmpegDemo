@@ -97,6 +97,7 @@ class MainActivity : AppCompatActivity() {
     private var pendingScroll = false
     private var outputFile: File? = null
     private var synthesisJob: Job? = null
+    private var displayedProgressPercent = 0
 
     private val presets = arrayOf(
         "ultrafast", "superfast", "veryfast", "faster",
@@ -274,6 +275,7 @@ class MainActivity : AppCompatActivity() {
         btnCancel.visibility = View.VISIBLE
         progressBar.visibility = View.VISIBLE
         progressBar.progress = 0
+        displayedProgressPercent = 0
         tvProgress.visibility = View.VISIBLE
         tvProgress.text = getString(R.string.status_preparing)
         cardResult.visibility = View.GONE
@@ -763,16 +765,12 @@ class MainActivity : AppCompatActivity() {
         val boundedStagePercent = stagePercent.coerceIn(0, 100)
         val overallPercent = (stage.basePercent + stage.weightPercent * boundedStagePercent / 100)
             .coerceIn(0, 100)
-        runOnUiThread {
-            progressBar.setProgress(overallPercent, true)
-            tvProgress.text = getString(
-                R.string.fmt_progress,
-                stage.overallStep,
-                stage.totalSteps,
-                overallPercent,
-                stage.description
-            )
-        }
+        renderProgress(
+            step = stage.overallStep,
+            total = stage.totalSteps,
+            percent = overallPercent,
+            description = stage.description
+        )
     }
 
     private fun buildBgmAudioFilter(config: SynthesisConfig, videoDurationMs: Long): String {
@@ -1191,10 +1189,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateProgress(step: Int, total: Int, desc: String) {
-        val pct = (step * 100) / total
+        val pct = ((step - 1).coerceAtLeast(0) * 100) / total
+        renderProgress(step, total, pct, desc)
+    }
+
+    private fun renderProgress(step: Int, total: Int, percent: Int, description: String) {
+        val boundedPercent = percent.coerceIn(0, 100)
+        val finalPercent = maxOf(displayedProgressPercent, boundedPercent)
+        displayedProgressPercent = finalPercent
         runOnUiThread {
-            progressBar.setProgress(pct, true)
-            tvProgress.text = getString(R.string.fmt_progress, step, total, pct, desc)
+            progressBar.setProgress(finalPercent, true)
+            tvProgress.text = getString(R.string.fmt_progress, step, total, finalPercent, description)
         }
     }
 
